@@ -9,6 +9,7 @@
   - proximity to All Time High.
   - minimum coin age.
 - The script overrides the existing coin list in WickHunter, no need to pause the bot.
+- The script **does not** blacklist coins that are in open positions.
 
 ## Instructions:
 - Drop the script file and the json settings file into the same folder with your bot.
