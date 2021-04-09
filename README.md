@@ -13,6 +13,7 @@
 
 ## Instructions:
 - Drop the script file and the json settings file into the same folder with your bot.
+- Make sure you have WickHunter bot version **v0.6.2** or higher.
 - Define the following in autoCoins.json file
   - **max1hrPercent**: maximum 1hr price change percentage.
   - **minAthPercent**: minimum proximity to ATH in percent.
