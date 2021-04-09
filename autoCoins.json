@@ -1,12 +1,15 @@
 [
-    {
-      "max1hrPercent": 5,
-      "minAthPercent": 5,
-      "minAge": 14,
-      "refresh": 15,
-      "proxy": "",
-      "blackList": [
-        "BTCUSDT","BTCBUSD","YFIUSDT","DEFIUSDT","DOGEUSDT","BTCUSDT_210326","BTCUSDT_210625","ETHUSDT_210326","ETHUSDT_210625"
-      ]
-    }
+  {
+    "max1hr24hrPercent": 5,
+    "minAthPercent": 5,
+    "minAge": 14,
+    "refresh": 15,
+    "proxy": "",
+    "proxyUser": "",
+    "proxyPass": "",
+    "discord": "",
+    "blackList": [
+      "BTCUSDT","BTCBUSD","YFIUSDT","DEFIUSDT","DOGEUSDT","BTCUSDT_210326","BTCUSDT_210625","ETHUSDT_210326","ETHUSDT_210625"
+    ]
+  }
 ]
