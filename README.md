@@ -4,7 +4,7 @@
 ![](https://i.imgur.com/bHQ9uC5.png)
 
 ## What it does:
-- This Powershell script allows you to avoid most pumps/dumps by dynamically controling the coin-list in WickHunter bot to blacklist\un-blacklist coins based on the following conditions:
+- This Powershell script allows you to avoid most pumps/dumps by dynamically controlling the coin-list in WickHunter bot to blacklist\un-blacklist coins based on the following conditions:
   - 1hr price percentage change.
   - proximity to All Time High.
   - minimum coin age.
