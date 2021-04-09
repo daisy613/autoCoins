@@ -63,7 +63,7 @@ Function write-log {
 function checkLatest () {
     $repo = "daisy613/autoCoins"
     $releases = "https://api.github.com/repos/$repo/releases"
-    $latestTag = [array](Invoke-WebRequest $releases | ConvertFrom-Json)[0].tag_name
+    $latestTag = [array](Invoke-WebRequest $releases -UseBasicParsing | ConvertFrom-Json)[0].tag_name
     $youngerVer = ($version, $latestTag | Sort-Object)[-1]
     if ($latestTag -and $version -ne $youngerVer) {
         write-log -string "Your version of $($repo) [$($version)] is outdated. Newer version [$($latestTag)] is available: https://github.com/$($repo)/releases/tag/$($latestTag)" -color "Red"
@@ -150,12 +150,12 @@ function getInfo () {
         }
     }
     write-log -string "[$date] Quarantined: $($quarantined -join ', ')" -color "yellow"
-    $coinsCurr = ((Invoke-SqliteQuery -DataSource $dataSource -Query "SELECT * FROM Instrument")  | ? {$_.IsPermitted -eq 1 }).symbol | sort
-    $unQuarantined = $coinlist | ? {$_ -notin  $coinsCurr} | sort
-    $message = "**UNQUARANTINED**: $($unQuarantined -join ', ')"
-    sendDiscord $discord $message
-    write-log -string "[$date] Un-Quarantined: $($unQuarantined -join ', ')" -color "yellow"
     $message = "**QUARANTINED**: $($quarantined -join ', ')"
+    sendDiscord $discord $message
+    $coinsCurr = ((Invoke-SqliteQuery -DataSource $dataSource -Query "SELECT * FROM Instrument")  | ? {$_.IsPermitted -eq 1 }).symbol | sort
+    write-log -string "[$date] Un-Quarantined: $($unQuarantined -join ', ')" -color "yellow"
+    $unQuarantined = $coins | ? {$_ -notin  $coinsCurr} | sort
+    $message = "**UNQUARANTINED**: $($unQuarantined -join ', ')"
     sendDiscord $discord $message
     return $coins
 }
