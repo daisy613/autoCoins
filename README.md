@@ -16,7 +16,7 @@
 - Drop the script file and the json settings file into the same folder with your bot.
 - Make sure you have WickHunter bot version **v0.6.2** or higher.
 - Define the following in autoCoins.json file
-  - **max1hr24hrPercent**: maximum 1hr/24hr price change percentage.
+  - **max1hr24hrPercent**: maximum 1hr/24hr price change percentage - it's a single value.
   - **minAthPercent**: minimum proximity to ATH in percent.
   - **minAge**: minimum coin age in days.
   - **refresh**: the period in minutes of how often to check (recommended minimum 15 mins due to possibility of over-running your API limit).
