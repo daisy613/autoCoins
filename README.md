@@ -20,6 +20,7 @@
   - **refresh**: the period in minutes of how often to check (recommended minimum 15 mins due to possibility of over-running your API limit).
   - **proxy**: (optional) IP proxy and port to use (example "http://25.12.124.35:2763"). Leave blank if no proxy used (""). Get proxy IPs [here](https://www.webshare.io/?referral_code=wn3nlqpeqog7).
   - **blacklist**: permanently blacklisted coins.
+- Double-click on the script or run it in Powershell console.
 - Submit any issues or enhancement ideas on the [Issues](https://github.com/daisy613/autoCoins/issues) page.
 
 ## Tips:
