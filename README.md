@@ -1,11 +1,12 @@
 # :blossom: AutoCoins
 (from [WH scripts collection](https://github.com/daisy613/wickHunter-scripts))
 
-![](https://i.imgur.com/bHQ9uC5.png)
+![](https://i.imgur.com/MaJq6B7.png)
+![](https://i.imgur.com/uhi4WdL.png)
 
 ## What it does:
 - This Powershell script allows you to avoid most pumps/dumps by dynamically controlling the coin-list in WickHunter bot to blacklist\un-blacklist coins based on the following conditions:
-  - 1hr price percentage change.
+  - combination of 1hr and 24hr price percentage changes.
   - proximity to All Time High.
   - minimum coin age.
 - The script overrides the existing coin list in WickHunter, no need to pause the bot.
@@ -15,7 +16,7 @@
 - Drop the script file and the json settings file into the same folder with your bot.
 - Make sure you have WickHunter bot version **v0.6.2** or higher.
 - Define the following in autoCoins.json file
-  - **max1hrPercent**: maximum 1hr price change percentage.
+  - **max1hr24hrPercent**: maximum 1hr price change percentage.
   - **minAthPercent**: minimum proximity to ATH in percent.
   - **minAge**: minimum coin age in days.
   - **refresh**: the period in minutes of how often to check (recommended minimum 15 mins due to possibility of over-running your API limit).
