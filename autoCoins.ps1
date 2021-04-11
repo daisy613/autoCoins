@@ -4,12 +4,9 @@
 ### issues:  https://github.com/daisy613/autoCoins/issues
 ### tldr:    This Powershell script dynamically controls the coin list in WickHunter bot to blacklist\un-blacklist coins based on proximity to ATH, 1hr price change and minimum coin age.
 ### Changelog:
-### * added 24hr price change to the criteria
-### * added ability to specify proxy credentials
-### * added display of coins that were unquarantined
-### * added discord alert for quarantined coins
-### * fixed PSSQLLite install issue
-### * fixed TLS issues
+### * separated 1hr and 24hr price changes into two parameters
+### * fixed calculations
+### * fixed Unquarantined blank display
 
 $path = Split-Path $MyInvocation.MyCommand.Path
 
@@ -20,7 +17,7 @@ If (-NOT ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdenti
     Break
 }
 
-$version = "v1.1.0"
+$version = "v1.2.0"
 [Net.ServicePointManager]::SecurityProtocol = "tls12, tls11, tls"
 $host.UI.RawUI.WindowTitle = "AutoCoins $($version) - $($path)"
 
@@ -37,7 +34,9 @@ $logfile = "$($path)\autoCoins.log"
 ### blacklist
 $blackList = $settings.blacklist
 ### cutoff 1hr percentage change, in %
-$max1hr24hrPercent = $settings.max1hr24hrPercent
+$max1hrPercent = $settings.max1hrPercent
+### cutoff 24hr percentage change, in %
+$max24hrPercent = $settings.max24hrPercent
 ### cutoff ATH percentage, in %
 $maxAthPercent = $settings.minAthPercent
 ### cutoff coin age, in days
@@ -117,13 +116,13 @@ function getSymbols () {
 # https://binance-docs.github.io/apidocs/futures/en/#kline-candlestick-data
 # https://binance-docs.github.io/apidocs/futures/en/#24hr-ticker-price-change-statistics
 function getInfo () {
-    Param($max1hr24hrPercent,$maxAthPercent,$minAge)
+    Param($max1hrPercent,$max24hrPercent,$maxAthPercent,$minAge)
     $symbols = getSymbols
     $coins = @()
     $quarantined = @()
     $count = 0
     $uri = "https://fapi.binance.com/fapi/v1/ticker/24hr"
-    $24HrPrices = (Invoke-RestMethodCustom $uri $proxy $proxyUser $proxyPass) | select symbol,@{ Name = 'priceChangePercent';  Expression = {[math]::Abs($_.priceChangePercent)}}
+    $24HrPrices = (Invoke-RestMethodCustom $uri $proxy $proxyUser $proxyPass) | select symbol,priceChangePercent
     $openPositions = (Invoke-SqliteQuery -DataSource $DataSource -Query "SELECT symbol FROM [Order] WHERE State = 'New'").Symbol
     $symbols = $symbols | ? { $_ -notin $blackList }
     foreach ($symbol in $symbols) {
@@ -134,7 +133,7 @@ function getInfo () {
         $uri = "https://fapi.binance.com/fapi/v1/klines?symbol=$($symbol)&interval=1m&limit=60"
         $1hrPrices = (Invoke-RestMethodCustom $uri $proxy $proxyUser $proxyPass) | % { $_[1] }
         $1hrPercentCurr = [math]::Abs((($1hrPrices[-1] - $1hrPrices[0]) * 100) / $1hrPrices[-1])
-        $24HrPricesCurr = ($24HrPrices | ? { $_.symbol -eq $symbol}).priceChangePercent
+        $24hrPercentCurr = [math]::Abs(($24HrPrices | ? { $_.symbol -eq $symbol}).priceChangePercent)
         #calculate ATH percentage
         $uri = "https://fapi.binance.com/fapi/v1/klines?symbol=$($symbol)&interval=1M&limit=500"
         $ath = [decimal] ((Invoke-RestMethodCustom $uri $proxy $proxyUser $proxyPass) | % { $_[2] } | measure -Maximum).Maximum
@@ -142,7 +141,7 @@ function getInfo () {
         # calculate age
         $uri = "https://fapi.binance.com/fapi/v1/klines?limit=1500&symbol=$($symbol)&interval=1d"
         $age = (Invoke-RestMethodCustom $uri $proxy $proxyUser $proxyPass).length
-        if ($1hrPercentCurr -lt $max1hr24hrPercent -and $1hrPercentCurr -lt $24HrPricesCurr -and $athPercentCurr -gt $maxAthPercent -and $age -gt $minAge -or $symbol -in $openPositions) {
+        if ($1hrPercentCurr -lt $max1hrPercent -and $24hrPercentCurr -lt $max24hrPercent -and $athPercentCurr -gt $maxAthPercent -and $age -gt $minAge -or $symbol -in $openPositions) {
             $coins += $symbol
         }
         else {
@@ -153,8 +152,8 @@ function getInfo () {
     $message = "**QUARANTINED**: $($quarantined -join ', ')"
     sendDiscord $discord $message
     $coinsCurr = ((Invoke-SqliteQuery -DataSource $dataSource -Query "SELECT * FROM Instrument")  | ? {$_.IsPermitted -eq 1 }).symbol | sort
-    write-log -string "[$date] Un-Quarantined: $($unQuarantined -join ', ')" -color "yellow"
     $unQuarantined = $coins | ? {$_ -notin  $coinsCurr} | sort
+    write-log -string "[$date] Un-Quarantined: $($unQuarantined -join ', ')" -color "yellow"
     $message = "**UNQUARANTINED**: $($unQuarantined -join ', ')"
     sendDiscord $discord $message
     return $coins

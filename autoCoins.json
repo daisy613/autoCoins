@@ -1,6 +1,7 @@
 [
   {
-    "max1hr24hrPercent": 5,
+    "max1hrPercent": 5,
+    "max24hrPercent": 5,
     "minAthPercent": 5,
     "minAge": 14,
     "refresh": 15,
