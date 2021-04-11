@@ -156,6 +156,9 @@ function getInfo () {
     write-log -string "[$date] Un-Quarantined: $($unQuarantined -join ', ')" -color "yellow"
     $message = "**UNQUARANTINED**: $($unQuarantined -join ', ')"
     sendDiscord $discord $message
+    write-log -string "[$date] Open Positions (couuld not quarantine): $($openPositions -join ', ')" -color "yellow"
+    $message = "**OPEN POSITIONS - NOT QUARANTINED**: $($openPositions -join ', ')"
+    sendDiscord $discord $message
     return $coins
 }
 
