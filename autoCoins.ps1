@@ -2,11 +2,10 @@
 ### discord: Daisy#2718
 ### site:    https://github.com/daisy613/autoCoins
 ### issues:  https://github.com/daisy613/autoCoins/issues
-### tldr:    This Powershell script dynamically controls the coin list in WickHunter bot to blacklist\un-blacklist coins based on proximity to ATH, 1hr price change and minimum coin age.
+### tldr:    This Powershell script dynamically controls the coin list in WickHunter bot to blacklist\un-blacklist coins based on proximity to ATH, 1hr/24hr price change and minimum coin age.
 ### Changelog:
-### * separated 1hr and 24hr price changes into two parameters
-### * fixed calculations
-### * fixed Unquarantined blank display
+### * fixed the total quarantine bug.
+### * added full coin quarantine reason details to the log file autoCoins.log
 
 $path = Split-Path $MyInvocation.MyCommand.Path
 
@@ -17,7 +16,7 @@ If (-NOT ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdenti
     Break
 }
 
-$version = "v1.2.0"
+$version = "v1.2.1"
 [Net.ServicePointManager]::SecurityProtocol = "tls12, tls11, tls"
 $host.UI.RawUI.WindowTitle = "AutoCoins $($version) - $($path)"
 
@@ -120,6 +119,7 @@ function getInfo () {
     $symbols = getSymbols
     $coins = @()
     $quarantined = @()
+    $objects = @()
     $count = 0
     $uri = "https://fapi.binance.com/fapi/v1/ticker/24hr"
     $24HrPrices = (Invoke-RestMethodCustom $uri $proxy $proxyUser $proxyPass) | select symbol,priceChangePercent
@@ -141,25 +141,40 @@ function getInfo () {
         # calculate age
         $uri = "https://fapi.binance.com/fapi/v1/klines?limit=1500&symbol=$($symbol)&interval=1d"
         $age = (Invoke-RestMethodCustom $uri $proxy $proxyUser $proxyPass).length
-        if ($1hrPercentCurr -lt $max1hrPercent -and $24hrPercentCurr -lt $max24hrPercent -and $athPercentCurr -gt $maxAthPercent -and $age -gt $minAge -or $symbol -in $openPositions) {
-            $coins += $symbol
+        [array]$objects += [PSCustomObject][object]@{
+            "symbol"   = $symbol
+            "1hrPerc"  = $(if ($1hrPercentCurr -lt $max1hrPercent) { "PASS" } else { "FAIL" })
+            "24hrPerc" = $(if ($24hrPercentCurr -lt $max24hrPercent) { "PASS" } else { "FAIL" })
+            "Ath"      = $(if ($athPercentCurr -gt $maxAthPercent) { "PASS" } else { "FAIL" })
+            "Age"      = $(if ($age -gt $minAge) { "PASS" } else { "FAIL" })
+            "Open"     = $(if ($symbol -notin $openPositions) { "PASS" } else { "FAIL" })
         }
-        else {
-            $quarantined += $symbol
-        }
+        # if ($1hrPercentCurr -gt $max1hrPercent -or $24hrPercentCurr -gt $max24hrPercent -or $athPercentCurr -lt $maxAthPercent -or $age -le $minAge -and $symbol -notin $openPositions) {
+        #     $quarantined += $symbol
+        # } else {
+        #     $coins += $symbol
+        # }
     }
+    $quarantined   = ($objects | ? { $_.'1hrPerc' -eq "FAIL" -or $_.'24hrPerc' -eq "FAIL" -or $_.Ath -eq "FAIL" -or $_.Age -eq "FAIL" -or $_.Open -eq "FAIL" }).symbol | sort
+    $permittedCurr = ((Invoke-SqliteQuery -DataSource $dataSource -Query "SELECT * FROM Instrument")  | ? {$_.IsPermitted -eq 1 }).symbol | sort
+    $permitted     = $symbols | ? {$_ -notin  $quarantined} | sort
+    $unQuarantined = $permitted | ? {$_ -notin  $permittedCurr} | sort
+    $objects | select * | ft -autosize | out-file -append $logfile
     write-log -string "[$date] Quarantined: $($quarantined -join ', ')" -color "yellow"
     $message = "**QUARANTINED**: $($quarantined -join ', ')"
     sendDiscord $discord $message
-    $coinsCurr = ((Invoke-SqliteQuery -DataSource $dataSource -Query "SELECT * FROM Instrument")  | ? {$_.IsPermitted -eq 1 }).symbol | sort
-    $unQuarantined = $coins | ? {$_ -notin  $coinsCurr} | sort
-    write-log -string "[$date] Un-Quarantined: $($unQuarantined -join ', ')" -color "yellow"
-    $message = "**UNQUARANTINED**: $($unQuarantined -join ', ')"
-    sendDiscord $discord $message
-    write-log -string "[$date] Open Positions (couuld not quarantine): $($openPositions -join ', ')" -color "yellow"
-    $message = "**OPEN POSITIONS - NOT QUARANTINED**: $($openPositions -join ', ')"
-    sendDiscord $discord $message
-    return $coins
+    if ($unQuarantined) {
+        write-log -string "[$date] Un-Quarantined: $($unQuarantined -join ', ')" -color "yellow"
+        $message = "**UNQUARANTINED**: $($unQuarantined -join ', ')"
+        sendDiscord $discord $message
+    }
+    $openNotQuarantined = ($objects | ? { $_.Open -eq "FAIL" -and ($_.'1hrPerc' -eq "FAIL" -or $_.'24hrPerc' -eq "FAIL" -or $_.Ath -eq "FAIL" -or $_.Age -eq "FAIL") }).symbol
+    if ($openNotQuarantined) {
+        write-log -string "[$date] Open Positions (could not quarantine): $($openNotQuarantined -join ', ')" -color "yellow"
+        $message = "**OPEN POSITIONS - NOT QUARANTINED**: $($openNotQuarantined -join ', ')"
+        sendDiscord $discord $message
+    }
+    return $permitted
 }
 
 write-host "`n`n`n`n`n`n`n`n`n`n"
@@ -171,7 +186,7 @@ while ($true) {
         write-log -string "[$date] Using proxy $($settings.proxy)" -color "Cyan"
     }
     write-log -string "[$date] Calculating coin list ..." -color "Yellow"
-    $coinList = getInfo $max1hr24hrPercent $maxAthPercent $minAge
+    $coinList = getInfo $max1hrPercent $max24hrPercent $maxAthPercent $minAge
     ### get currently enabled coins
     if ($coinList) {
         # write-log -string "Backing up your current WH database..." -color "Green"
@@ -191,8 +206,7 @@ while ($true) {
         if ($coins) { Invoke-SqliteQuery -DataSource $dataSource -Query $query } else {write-log -string "Found no coins data to import! Try again please." -color "Red" ; sleep 3 ; exit}
         Invoke-SQLiteBulkCopy -DataTable ($coins | Out-DataTable) -DataSource $dataSource -Table "Instrument" -NotifyAfter 1000 -Confirm:$false
         write-log -string "Coin settings imported to $($dataSource)" -color "Green"
-    }
-    else {
+    } else {
         write-log -string "[$date] Data could not be obtained. Waiting till next cycle..." -color "red"
     }
     betterSleep ($refresh * 60) "AutoCoins $($version) (path: $($path))"
