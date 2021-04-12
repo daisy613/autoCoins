@@ -9,7 +9,7 @@
   - combination of 1hr and 24hr price percentage changes.
   - proximity to All Time High.
   - minimum coin age.
-- The script overrides the existing coin list in WickHunter, no need to pause the bot.
+- The script **overrides the existing coin list in WickHunter**, no need to pause the bot.
 - The script **does not** blacklist coins that are in open positions.
 
 ## Instructions:
