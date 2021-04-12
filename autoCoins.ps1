@@ -4,8 +4,7 @@
 ### issues:  https://github.com/daisy613/autoCoins/issues
 ### tldr:    This Powershell script dynamically controls the coin list in WickHunter bot to blacklist\un-blacklist coins based on proximity to ATH, 1hr/24hr price change and minimum coin age.
 ### Changelog:
-### * fixed the total quarantine bug.
-### * added full coin quarantine reason details to the log file autoCoins.log
+### * bugfix for quarantine opened positions, again :)
 
 $path = Split-Path $MyInvocation.MyCommand.Path
 
@@ -16,7 +15,7 @@ If (-NOT ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdenti
     Break
 }
 
-$version = "v1.2.1"
+$version = "v1.2.2"
 [Net.ServicePointManager]::SecurityProtocol = "tls12, tls11, tls"
 $host.UI.RawUI.WindowTitle = "AutoCoins $($version) - $($path)"
 
@@ -155,7 +154,7 @@ function getInfo () {
         #     $coins += $symbol
         # }
     }
-    $quarantined   = ($objects | ? { $_.'1hrPerc' -eq "FAIL" -or $_.'24hrPerc' -eq "FAIL" -or $_.Ath -eq "FAIL" -or $_.Age -eq "FAIL" -or $_.Open -eq "FAIL" }).symbol | sort
+    $quarantined   = ($objects | ? { ($_.'1hrPerc' -eq "FAIL" -or $_.'24hrPerc' -eq "FAIL" -or $_.Ath -eq "FAIL" -or $_.Age -eq "FAIL") -and $_.Open -eq "PASS" }).symbol | sort
     $permittedCurr = ((Invoke-SqliteQuery -DataSource $dataSource -Query "SELECT * FROM Instrument")  | ? {$_.IsPermitted -eq 1 }).symbol | sort
     $permitted     = $symbols | ? {$_ -notin  $quarantined} | sort
     $unQuarantined = $permitted | ? {$_ -notin  $permittedCurr} | sort
