@@ -4,7 +4,7 @@
 ### issues:  https://github.com/daisy613/autoCoins/issues
 ### tldr:    This Powershell script dynamically controls the coin list in WickHunter bot to blacklist\un-blacklist coins based on proximity to ATH, 1hr/24hr price change and minimum coin age.
 ### Changelog:
-### * bugfix for quarantine opened positions, again :)
+### * added values to the coin details in log file for debug purposes
 
 $path = Split-Path $MyInvocation.MyCommand.Path
 
@@ -15,7 +15,7 @@ If (-NOT ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdenti
     Break
 }
 
-$version = "v1.2.2"
+$version = "v1.2.3"
 [Net.ServicePointManager]::SecurityProtocol = "tls12, tls11, tls"
 $host.UI.RawUI.WindowTitle = "AutoCoins $($version) - $($path)"
 
@@ -142,17 +142,16 @@ function getInfo () {
         $age = (Invoke-RestMethodCustom $uri $proxy $proxyUser $proxyPass).length
         [array]$objects += [PSCustomObject][object]@{
             "symbol"   = $symbol
-            "1hrPerc"  = $(if ($1hrPercentCurr -lt $max1hrPercent) { "PASS" } else { "FAIL" })
-            "24hrPerc" = $(if ($24hrPercentCurr -lt $max24hrPercent) { "PASS" } else { "FAIL" })
+            "perc1hr"  = $(if ($1hrPercentCurr -lt $max1hrPercent) { "PASS" } else { "FAIL" })
+            "perc1hrVal"  = [math]::Round($1hrPercentCurr,2)
+            "perc24hr" = $(if ($24hrPercentCurr -lt $max24hrPercent) { "PASS" } else { "FAIL" })
+            "perc24hrVal" = [math]::Round($24hrPercentCurr,2)
             "Ath"      = $(if ($athPercentCurr -gt $maxAthPercent) { "PASS" } else { "FAIL" })
+            "AthVal"      = [math]::Round($ath,2)
             "Age"      = $(if ($age -gt $minAge) { "PASS" } else { "FAIL" })
+            "AgeVal"      = $age
             "Open"     = $(if ($symbol -notin $openPositions) { "PASS" } else { "FAIL" })
         }
-        # if ($1hrPercentCurr -gt $max1hrPercent -or $24hrPercentCurr -gt $max24hrPercent -or $athPercentCurr -lt $maxAthPercent -or $age -le $minAge -and $symbol -notin $openPositions) {
-        #     $quarantined += $symbol
-        # } else {
-        #     $coins += $symbol
-        # }
     }
     $quarantined   = ($objects | ? { ($_.'1hrPerc' -eq "FAIL" -or $_.'24hrPerc' -eq "FAIL" -or $_.Ath -eq "FAIL" -or $_.Age -eq "FAIL") -and $_.Open -eq "PASS" }).symbol | sort
     $permittedCurr = ((Invoke-SqliteQuery -DataSource $dataSource -Query "SELECT * FROM Instrument")  | ? {$_.IsPermitted -eq 1 }).symbol | sort
@@ -167,7 +166,7 @@ function getInfo () {
         $message = "**UNQUARANTINED**: $($unQuarantined -join ', ')"
         sendDiscord $discord $message
     }
-    $openNotQuarantined = ($objects | ? { $_.Open -eq "FAIL" -and ($_.'1hrPerc' -eq "FAIL" -or $_.'24hrPerc' -eq "FAIL" -or $_.Ath -eq "FAIL" -or $_.Age -eq "FAIL") }).symbol
+    $openNotQuarantined = ($objects | ? { $_.Open -eq "FAIL" -and ($_.perc1hr -eq "FAIL" -or $_.perc24hr -eq "FAIL" -or $_.Ath -eq "FAIL" -or $_.Age -eq "FAIL") }).symbol
     if ($openNotQuarantined) {
         write-log -string "[$date] Open Positions (could not quarantine): $($openNotQuarantined -join ', ')" -color "yellow"
         $message = "**OPEN POSITIONS - NOT QUARANTINED**: $($openNotQuarantined -join ', ')"
