@@ -8,21 +8,19 @@
 ### * added current coin name to the progress bar
 ### * fixed a 1hr/24hr logic bug
 ### * removed redundant date output from console/logfile
-### * set execution policy
 
 $path = Split-Path $MyInvocation.MyCommand.Path
 
-### run powershell as admin$settings.discord
+### run powershell as admin
 If (-NOT ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")) {
     $arguments = "& '" + $myinvocation.mycommand.definition + "'"
     Start-Process powershell -Verb runAs -ArgumentList $arguments -WorkingDirectory $path
     Break
 }
 
-$version = "v1.2.4a"
+$version = "v1.2.5"
 [Net.ServicePointManager]::SecurityProtocol = "tls12, tls11, tls"
 $host.UI.RawUI.WindowTitle = "AutoCoins $($version) - $($path)"
-Set-ExecutionPolicy -ExecutionPolicy Unrestricted -Force -Confirm:$false -Scope CurrentUser
 
 If (-not (Get-Module -Name "PSSQLite")) {
     Install-Module "PSSQLite" -Scope CurrentUser
@@ -146,17 +144,17 @@ function getInfo () {
     $objects | select * | ft -autosize | out-file -append $logfile
     write-log -string "Quarantined: $($quarantined -join ', ')" -color "yellow"
     $message = "**QUARANTINED**: $($quarantined -join ', ')"
-    sendDiscord $discord $message
+    sendDiscord $settings.discord $message
     if ($unQuarantined) {
         write-log -string "Un-Quarantined: $($unQuarantined -join ', ')" -color "yellow"
         $message = "**UNQUARANTINED**: $($unQuarantined -join ', ')"
-        sendDiscord $discord $message
+        sendDiscord $settings.discord $message
     }
     $openNotQuarantined = ($objects | ? { $_.Open -eq "FAIL" -and ($_.perc1hr -eq "FAIL" -or $_.perc24hr -eq "FAIL" -or $_.Ath -eq "FAIL" -or $_.Age -eq "FAIL") }).symbol
     if ($openNotQuarantined) {
         write-log -string "Open Positions (could not quarantine): $($openNotQuarantined -join ', ')" -color "yellow"
         $message = "**OPEN POSITIONS - NOT QUARANTINED**: $($openNotQuarantined -join ', ')"
-        sendDiscord $discord $message
+        sendDiscord $settings.discord $message
     }
     return $permitted
 }
