@@ -11,7 +11,6 @@
 ### * set execution policy
 
 $path = Split-Path $MyInvocation.MyCommand.Path
-set-ExecutionPolicy -ExecutionPolicy Unrestricted -Force -Confirm:$false -Scope CurrentUser
 
 ### run powershell as admin$settings.discord
 If (-NOT ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")) {
@@ -20,10 +19,10 @@ If (-NOT ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdenti
     Break
 }
 
-$version = "v1.2.4"
+$version = "v1.2.4a"
 [Net.ServicePointManager]::SecurityProtocol = "tls12, tls11, tls"
 $host.UI.RawUI.WindowTitle = "AutoCoins $($version) - $($path)"
-set-ExecutionPolicy -ExecutionPolicy Unrestricted -Force -Confirm:$false
+Set-ExecutionPolicy -ExecutionPolicy Unrestricted -Force -Confirm:$false -Scope CurrentUser
 
 If (-not (Get-Module -Name "PSSQLite")) {
     Install-Module "PSSQLite" -Scope CurrentUser
