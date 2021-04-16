@@ -21,7 +21,7 @@
   - **minAge**: minimum coin age in days.
   - **refresh**: the period in minutes of how often to check (recommended minimum 15 mins due to possibility of over-running your API limit).
   - **discord**: (optional) your discord webhook.
-  - **proxy**: (optional) IP proxy and port to use (example "http://25.12.124.35:2763"). Leave blank if no proxy used (""). Get proxy IPs [here](https://www.webshare.io/?referral_code=wn3nlqpeqog7).
+  - **proxy**: (optional) IP proxy and port to use (example "http://25.12.124.35:2763"). Leave blank if no proxy used (""). Get proxy IPs [here](https://www.webshare.io/?referral_code=wn3nlqpeqog7). Note: you dont need to use ProxyCap, as you would for the bot itself. All you have to do is get one of the IPs from the list WebShare site gives you when you sign up.
   - **proxyUser**: (optional) proxy user.
   - **proxyPass**: (optional) proxy password.
   - **blacklist**: permanently blacklisted coins.
