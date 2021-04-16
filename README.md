@@ -13,7 +13,7 @@
 - The script **does not** blacklist coins that are in open positions.
 
 ## Instructions:
-- Drop the script file and the json settings file into the same folder with your bot.
+- Drop the script file and the json settings file into the same folder with your bot. **Make sure the folder is not located on your desktop but is a dedicated folder elsewhere on your drive.**
 - Make sure you have WickHunter bot version **v0.6.2** or higher.
 - Define the following in autoCoins.json file
   - **max1hr24hrPercent**: maximum 1hr/24hr price change percentage - it's a single value.
@@ -27,6 +27,11 @@
   - **blacklist**: permanently blacklisted coins.
 - Double-click on the script or run it in Powershell console.
 - Submit any issues or enhancement ideas on the [Issues](https://github.com/daisy613/autoCoins/issues) page. I cannot monitor the main discord chat all the time so I can't respond to all questions/issues there.
+
+## Troubleshooting:
+- If you get the error "Invoke-Sqlite query : Exception calling "Fill" with "1" arguments..." - Make sure the folder is not located on your desktop but is a dedicated folder elsewhere on your drive. You can also right-click on the script file and uncheck the Block check-mark.
+- If you get the error saying that the script is not digitally signed, run the following command at the Administrative Powershell console:
+  - Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass 
 
 ## Tips:
 - USDT (TRC20): TNuwZebdZmoDxrJRxUbyqzG48H4KRDR7wB
