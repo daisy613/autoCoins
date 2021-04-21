@@ -4,10 +4,8 @@
 ### issues:  https://github.com/daisy613/autoCoins/issues
 ### tldr:    This Powershell script dynamically controls the coin list in WickHunter bot to blacklist\un-blacklist coins based on proximity to ATH, 1hr/24hr price change and minimum coin age.
 ### Changelog:
-### * settings can be changed without restarting script - they will be read upon the next refresh cycle
-### * added current coin name to the progress bar
-### * fixed a 1hr/24hr logic bug
-### * removed redundant date output from console/logfile
+### * added quarantine cooldown function - checks the last X 1hr candle changes (X is defined in settings)
+### * added max size for the logfile at 10MB, backs up once
 
 $path = Split-Path $MyInvocation.MyCommand.Path
 
@@ -18,7 +16,7 @@ If (-NOT ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdenti
     Break
 }
 
-$version = "v1.2.5"
+$version = "v1.2.6"
 [Net.ServicePointManager]::SecurityProtocol = "tls12, tls11, tls"
 $host.UI.RawUI.WindowTitle = "AutoCoins $($version) - $($path)"
 
@@ -28,9 +26,16 @@ If (-not (Get-Module -Name "PSSQLite")) {
 }
 
 $settings = gc "$($path)\autoCoins.json" | ConvertFrom-Json
+# housekeeping
+if (!("cooldownHrs" -in ($settings | gm).name)) {
+    $settings | Add-Member -MemberType NoteProperty -Name "cooldownHrs" -Value 4
+    $settings | ConvertTo-Json | sc "$($path)\autoCoins.json" -force
+}
 if (!($settings)) { write-log -string "Cannot find $($path)\autoCoins.json file!" -color "DarkRed"; sleep 30 ; exit }
 $dataSource = "$($path)\storage.db"
 $logfile = "$($path)\autoCoins.log"
+$maxLogSize = 10MB
+
 
 ######################################################################################################
 
@@ -62,6 +67,19 @@ function betterSleep () {
         [System.Threading.Thread]::Sleep(500)
     }
     Write-Progress -Activity "$($message)" -Status "Sleeping $($minutes) minutes..." -SecondsRemaining 0 -Completed
+}
+
+function archiveLog () {
+    param ($maxLogSize = 50MB)
+    $logSize = (Get-Item -Path $logFile).Length / 1MB
+    if ($logSize -ge $maxLogSize) {
+        $logFile = Get-Item -Path $logFile
+        $archiveFileName = '{0}_{1}{2}' -f $logFile.BaseName,(Get-Date -Format 'yyyy-MM-dd'),$logFile.Extension
+        Copy-Item -Path $logFile -Destination $archiveFileName
+        # if (test-path "$($logFile).zip") { Remove-Item "$($logFile).zip" }
+        # Compress-Archive -Path $archiveFileName -DestinationPath "$($logFile).zip"
+        Remove-Item -Path $logFile
+    }
 }
 
 function sendDiscord () {
@@ -113,21 +131,29 @@ function getInfo () {
         $percentDone = $count / $symbols.length * 100
         Write-Progress -Activity "Processing ..." -Status "Symbol: $($symbol) [$($count)/$($symbols.length)]" -PercentComplete $percentDone
         # calculate the 1hr price change
-        $uri = "https://fapi.binance.com/fapi/v1/klines?symbol=$($symbol)&interval=1m&limit=60"
+        $limit = $settings.cooldownHrs * 60
+        $uri = "https://fapi.binance.com/fapi/v1/klines?symbol=$($symbol)&interval=1m&limit=$($limit)"
         $1hrPrices = (Invoke-RestMethodCustom $uri $settings.proxy $settings.proxyUser $settings.proxyPass) | % { $_[1] }
-        $1hrPercentCurr = [math]::Abs((($1hrPrices[-1] - $1hrPrices[0]) * 100) / $1hrPrices[-1])
+        $1hrPercent = @()
+        $i = 0
+        do {
+            $i++
+            $end = $i * 60 - 1
+            $start = $end - 59
+            $1hrPercent += [math]::Abs((($1hrPrices[$end] - $1hrPrices[$start]) * 100) / $1hrPrices[$end])
+        } until ($i -eq $settings.cooldownHrs)
         $24hrPercentCurr = [math]::Abs(($24HrPrices | ? { $_.symbol -eq $symbol}).priceChangePercent)
         #calculate ATH percentage
         $uri = "https://fapi.binance.com/fapi/v1/klines?symbol=$($symbol)&interval=1M&limit=500"
         $ath = [decimal] ((Invoke-RestMethodCustom $uri $settings.proxy $settings.proxyUser $settings.proxyPass) | % { $_[2] } | measure -Maximum).Maximum
         $athPercentCurr = (($ath - $1hrPrices[-1]) * 100 / $ath)
         # calculate age
-        $uri = "https://fapi.binance.com/fapi/v1/klines?limit=1500&symbol=$($symbol)&interval=1d"
+        $uri = "https://fapi.binance.com/fapi/v1/klines?symbol=$($symbol)&interval=1d&limit=1500"
         $age = (Invoke-RestMethodCustom $uri $settings.proxy $settings.proxyUser $settings.proxyPass).length
         [array]$objects += [PSCustomObject][object]@{
             "symbol"      = $symbol
-            "perc1hr"     = $(if ($1hrPercentCurr -lt $max1hrPercent) { "PASS" } else { "FAIL" })
-            "perc1hrVal"  = [math]::Round($1hrPercentCurr,2)
+            "perc1hr"     = $(if (($1hrPercent| measure -Maximum).Maximum -lt $max1hrPercent) { "PASS" } else { "FAIL" })
+            "perc1hrVal"  = $1hrPercent | % { [math]::Round($_,2) }
             "perc24hr"    = $(if ($24hrPercentCurr -lt $max24hrPercent) { "PASS" } else { "FAIL" })
             "perc24hrVal" = [math]::Round($24hrPercentCurr,2)
             "Ath"         = $(if ($athPercentCurr -gt $minAthPercent) { "PASS" } else { "FAIL" })
@@ -141,7 +167,7 @@ function getInfo () {
     $permittedCurr = ((Invoke-SqliteQuery -DataSource $dataSource -Query "SELECT * FROM Instrument")  | ? {$_.IsPermitted -eq 1 }).symbol | sort
     $permitted     = $symbols | ? {$_ -notin  $quarantined} | sort
     $unQuarantined = $permitted | ? {$_ -notin  $permittedCurr} | sort
-    $objects | select * | ft -autosize | out-file -append $logfile
+    $objects | select symbol,perc1hrVal,perc1hr,perc24hrVal,perc24hr,AthVal,Ath,AgeVal,Age,Open | ft -autosize | out-file -append $logfile -encoding ASCII
     write-log -string "Quarantined: $($quarantined -join ', ')" -color "yellow"
     $message = "**QUARANTINED**: $($quarantined -join ', ')"
     sendDiscord $settings.discord $message

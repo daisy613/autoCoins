@@ -11,6 +11,7 @@
     "discord": "",
     "blackList": [
       "BTCUSDT","BTCBUSD","YFIUSDT","DEFIUSDT","DOGEUSDT","BTCUSDT_210326","BTCUSDT_210625","ETHUSDT_210326","ETHUSDT_210625"
-    ]
+    ],
+    "cooldownHrs":  4
   }
 ]
