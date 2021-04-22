@@ -18,7 +18,7 @@
 - Define the following in autoCoins.json file
   - **max1hrPercent**: maximum 1hr price change percentage (default = 5).
   - **max24hrPercent**: maximum 24hr price change percentage (default = 10).
-  - **cooldownHrs**: the number of 1hr candles into the past to check for the price changes. Example: if the number is 4 (default), the bot will quarantine coins that had a 1hr price change more than defined in _max1hrPercent_ within the past X _cooldownHrs_ (default = 4).
+  - **cooldownHrs**: the number of 1hr candles into the past to check for the price changes. Example: if the number is 4 (default), the bot will quarantine coins that had a 1hr price change more than defined in _max1hrPercent_ within the past X _cooldownHrs_ (default = 4). Note: cooldown only applies to 1hr changes, not to ATH or 24hr price changes.
   - **minAthPercent**: minimum proximity to ATH in percent (default = 5).
   - **minAge**: minimum coin age in days (default = 14).
   - **refresh**: the period in minutes of how often to check (recommended minimum 15 mins due to possibility of over-running your API limit) (default = 15).
