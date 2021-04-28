@@ -2,7 +2,7 @@
 (from [WH scripts collection](https://github.com/daisy613/wickHunter-scripts))
 
 ![](https://i.imgur.com/c3dNk9I.png)
-![](https://i.imgur.com/uhi4WdL.png)
+![](https://i.imgur.com/4VUpzYf.png)
 
 ## What it does:
 - This Powershell script allows you to avoid most pumps/dumps by dynamically controlling the coin-list in WickHunter bot to blacklist\un-blacklist coins based on the following conditions:
