@@ -4,8 +4,11 @@
 ### issues:  https://github.com/daisy613/autoCoins/issues
 ### tldr:    This Powershell script dynamically controls the coin list in WickHunter bot to blacklist\un-blacklist coins based on proximity to ATH, 1hr/24hr price change and minimum coin age.
 ### Changelog:
-### * added quarantine cooldown function - checks the last X 1hr candle changes (X is defined in settings)
-### * added max size for the logfile at 10MB, backs up once
+### * increased coin processing speed by running multiple threads.
+### * added 4hr price change (default 5%).
+### * added marketSwing stats by Miyagi (Big thanks!!!).
+### * added execution time display for coin calculations.
+### * corrected the ATH value reported in the logs.
 
 $path = Split-Path $MyInvocation.MyCommand.Path
 
@@ -16,13 +19,17 @@ If (-NOT ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdenti
     Break
 }
 
-$version = "v1.2.6"
+$version = "v1.2.7"
 [Net.ServicePointManager]::SecurityProtocol = "tls12, tls11, tls"
 $host.UI.RawUI.WindowTitle = "AutoCoins $($version) - $($path)"
 
-If (-not (Get-Module -Name "PSSQLite")) {
-    Install-Module "PSSQLite" -Scope CurrentUser
+If (!(Get-Module -Name "PSSQLite")) {
+    Install-Module "PSSQLite" -Scope CurrentUser -SkipPublisherCheck -Confirm:$false -ea SilentlyContinue
     Import-Module "PSSQLite" -DisableNameChecking -Verbose:$false | Out-Null
+}
+If (!(Get-Module -Name "PoshRSJob")) {
+    Install-Module "PoshRSJob" -Scope CurrentUser -SkipPublisherCheck -Confirm:$false -ea SilentlyContinue
+    Import-Module "PoshRSJob" -DisableNameChecking -Verbose:$false | Out-Null
 }
 
 $settings = gc "$($path)\autoCoins.json" | ConvertFrom-Json
@@ -31,11 +38,15 @@ if (!("cooldownHrs" -in ($settings | gm).name)) {
     $settings | Add-Member -MemberType NoteProperty -Name "cooldownHrs" -Value 4
     $settings | ConvertTo-Json | sc "$($path)\autoCoins.json" -force
 }
+if (!("max4hrPercent" -in ($settings | gm).name)) {
+    $settings | Add-Member -MemberType NoteProperty -Name "max4hrPercent" -Value 5
+    $settings | ConvertTo-Json | sc "$($path)\autoCoins.json" -force
+}
 if (!($settings)) { write-log -string "Cannot find $($path)\autoCoins.json file!" -color "DarkRed"; sleep 30 ; exit }
 $dataSource = "$($path)\storage.db"
 $logfile = "$($path)\autoCoins.log"
 $maxLogSize = 10MB
-
+$MaxJobs = 10
 
 ######################################################################################################
 
@@ -98,8 +109,10 @@ function Invoke-RestMethodCustom ($uri,$proxy,$proxyUser,$proxyPass) {
     if ($proxy -ne "http://PROXYIP:PROXYPORT" -and $proxy -ne "" -and $proxyUser -eq "") {
         $result = Invoke-RestMethod -Uri $uri -Proxy $proxy
     } elseif ($proxy -ne "http://PROXYIP:PROXYPORT" -and $proxy -ne "" -and $proxyUser -ne "") {
-        [System.Security.SecureString]$proxyPassSec = ConvertTo-SecureString $proxyPass -AsPlainText -Force
-        $proxCred = new-object -typename System.Management.Automation.PSCredential -argumentlist ($proxyUser, $proxyPassSec)
+        $proxCred = new-object -typename System.Management.Automation.PSCredential -argumentlist ([pscustomobject] @{
+            UserName = $proxyUser;
+            Password = (ConvertTo-SecureString -AsPlainText -Force -String $proxyPass)[0]
+          })
         $result = Invoke-RestMethod -Uri $uri -Proxy $proxy -ProxyCredential $proxCred
     } else {
         $result = Invoke-RestMethod -Uri $uri
@@ -116,22 +129,38 @@ function getSymbols () {
 # https://binance-docs.github.io/apidocs/futures/en/#kline-candlestick-data
 # https://binance-docs.github.io/apidocs/futures/en/#24hr-ticker-price-change-statistics
 function getInfo () {
-    Param($max1hrPercent,$max24hrPercent,$minAthPercent,$minAge)
+    # Param($max1hrPercent,$max24hrPercent,$minAthPercent,$minAge)
     $symbols = getSymbols
     $coins = @()
     $quarantined = @()
-    $objects = @()
-    $count = 0
+    write-host "Calculating coin list ...  " -f "DarkGray" -NoNewline
     $uri = "https://fapi.binance.com/fapi/v1/ticker/24hr"
     $24HrPrices = (Invoke-RestMethodCustom $uri $settings.proxy $settings.proxyUser $settings.proxyPass) | select symbol,priceChangePercent
     $openPositions = (Invoke-SqliteQuery -DataSource $DataSource -Query "SELECT symbol FROM [Order] WHERE State = 'New'").Symbol
     $symbols = $symbols | ? { $_ -notin $settings.blacklist }
-    foreach ($symbol in $symbols) {
-        $count++
-        $percentDone = $count / $symbols.length * 100
-        Write-Progress -Activity "Processing ..." -Status "Symbol: $($symbol) [$($count)/$($symbols.length)]" -PercentComplete $percentDone
+    $objects = @()
+    $scriptBlock = {
+        param($symbol)
+        function Invoke-RestMethodCustom ($uri,$proxy,$proxyUser,$proxyPass) {
+            if ($proxy -ne "http://PROXYIP:PROXYPORT" -and $proxy -ne "" -and $proxyUser -eq "") {
+                $result = Invoke-RestMethod -Uri $uri -Proxy $proxy
+            } elseif ($proxy -ne "http://PROXYIP:PROXYPORT" -and $proxy -ne "" -and $proxyUser -ne "") {
+                $proxCred = new-object -typename System.Management.Automation.PSCredential -argumentlist ([pscustomobject] @{
+                    UserName = $proxyUser;
+                    Password = (ConvertTo-SecureString -AsPlainText -Force -String $proxyPass)[0]
+                  })
+                $result = Invoke-RestMethod -Uri $uri -Proxy $proxy -ProxyCredential $proxCred
+            } else {
+                $result = Invoke-RestMethod -Uri $uri
+            }
+            return $result
+        }
+        $settings = $Using:settings
         # calculate the 1hr price change
-        $limit = $settings.cooldownHrs * 60
+        if ($settings.cooldownHrs -ge 4) {
+            $minCandles = $settings.cooldownHrs
+        } else { $minCandles = 4 }
+        $limit = $minCandles * 60
         $uri = "https://fapi.binance.com/fapi/v1/klines?symbol=$($symbol)&interval=1m&limit=$($limit)"
         $1hrPrices = (Invoke-RestMethodCustom $uri $settings.proxy $settings.proxyUser $settings.proxyPass) | % { $_[1] }
         $1hrPercent = @()
@@ -140,34 +169,63 @@ function getInfo () {
             $i++
             $end = $i * 60 - 1
             $start = $end - 59
-            $1hrPercent += [math]::Abs((($1hrPrices[$end] - $1hrPrices[$start]) * 100) / $1hrPrices[$end])
-        } until ($i -eq $settings.cooldownHrs)
-        $24hrPercentCurr = [math]::Abs(($24HrPrices | ? { $_.symbol -eq $symbol}).priceChangePercent)
-        #calculate ATH percentage
-        $uri = "https://fapi.binance.com/fapi/v1/klines?symbol=$($symbol)&interval=1M&limit=500"
-        $ath = [decimal] ((Invoke-RestMethodCustom $uri $settings.proxy $settings.proxyUser $settings.proxyPass) | % { $_[2] } | measure -Maximum).Maximum
-        $athPercentCurr = (($ath - $1hrPrices[-1]) * 100 / $ath)
+            $1hrPercent += (($1hrPrices[$end] - $1hrPrices[$start]) * 100) / $1hrPrices[$end]
+        } until ($i -eq $minCandles)
+        $4hrPercentCurr = (($1hrPrices[239] - $1hrPrices[0]) * 100) / $1hrPrices[239]
+        $24hrPercentCurr = ($Using:24HrPrices | ? { $_.symbol -eq $symbol}).priceChangePercent
         # calculate age
         $uri = "https://fapi.binance.com/fapi/v1/klines?symbol=$($symbol)&interval=1d&limit=1500"
         $age = (Invoke-RestMethodCustom $uri $settings.proxy $settings.proxyUser $settings.proxyPass).length
-        [array]$objects += [PSCustomObject][object]@{
+        # calculate ATH percentage
+        # NOTE: the ATH calculation only shows the past 20 months due to Binance restrictions, so it's not a true ATH.
+        $limit = [math]::Round((($age / 30) + 1), 0)
+        $uri = "https://fapi.binance.com/fapi/v1/klines?symbol=$($symbol)&interval=1M&limit=$($limit)"
+        $ath = [decimal] ((Invoke-RestMethodCustom $uri $settings.proxy $settings.proxyUser $settings.proxyPass) | % { $_[2] } | measure -Maximum).Maximum
+        $athPercentCurr = (($ath - $1hrPrices[-1]) * 100 / $ath)
+        $x = $settings.cooldownHrs - 1
+        [PSCustomObject][object]@{
             "symbol"      = $symbol
-            "perc1hr"     = $(if (($1hrPercent| measure -Maximum).Maximum -lt $max1hrPercent) { "PASS" } else { "FAIL" })
-            "perc1hrVal"  = $1hrPercent | % { [math]::Round($_,2) }
-            "perc24hr"    = $(if ($24hrPercentCurr -lt $max24hrPercent) { "PASS" } else { "FAIL" })
+            "perc1hr"     = $(if (($1hrPercent[0..$x] | % { [math]::Abs($_) } | measure -Maximum).Maximum -lt $settings.max1hrPercent) { "PASS" } else { "FAIL" })
+            "perc1hrVal"  = $1hrPercent[0..$x] | % { [math]::Round($_,2) }
+            "perc4hr"     = $(if ([math]::Abs($4hrPercentCurr) -lt $settings.max4hrPercent) { "PASS" } else { "FAIL" })
+            "perc4hrVal"  = [math]::Round($4hrPercentCurr,2)
+            "perc24hr"    = $(if ([math]::Abs($24hrPercentCurr) -lt $settings.max24hrPercent) { "PASS" } else { "FAIL" })
             "perc24hrVal" = [math]::Round($24hrPercentCurr,2)
-            "Ath"         = $(if ($athPercentCurr -gt $minAthPercent) { "PASS" } else { "FAIL" })
-            "AthVal"      = [math]::Round($ath,2)
-            "Age"         = $(if ($age -gt $minAge) { "PASS" } else { "FAIL" })
+            "Ath"         = $(if ($athPercentCurr -gt $settings.minAthPercent) { "PASS" } else { "FAIL" })
+            "AthVal"      = [math]::Round($athPercentCurr,2)
+            "Age"         = $(if ($age -gt $settings.minAge) { "PASS" } else { "FAIL" })
             "AgeVal"      = $age
-            "Open"        = $(if ($symbol -notin $openPositions) { "PASS" } else { "FAIL" })
+            "Open"        = $(if ($symbol -notin $Using:openPositions) { "PASS" } else { "FAIL" })
         }
     }
-    $quarantined   = ($objects | ? { ($_.perc1hr -eq "FAIL" -or $_.perc24hr -eq "FAIL" -or $_.Ath -eq "FAIL" -or $_.Age -eq "FAIL") -and $_.Open -eq "PASS" }).symbol | sort
+    $stopWatch = [system.diagnostics.stopwatch]::StartNew()
+    $symbols | Start-RSJob -ArgumentList $_ -Throttle $MaxJobs -ScriptBlock $scriptBlock | out-null
+    $PollingInterval = 1
+    $CompletedThreads = 0
+    $PctComplete = 0
+    $CurrentJobs = @()
+    $Status = Get-RSJob | Group-Object -Property State
+    $TotalThreads = ($Status | Select-Object -ExpandProperty Count | Measure-Object -Sum).Sum
+    while ($CompletedThreads -lt $TotalThreads) {
+        $CurrentJobs = Get-RSJob
+        $objects += $CurrentJobs.Where( { $PSItem.State -eq "Completed" }) | Receive-RSJob
+        $CurrentJobs.Where( { $PSItem.State -eq "Completed" }) | Remove-RSJob #| Out-Null
+        $Status = $CurrentJobs | Group-Object -Property State
+        $CompletedThreads += $Status | Where-Object { $PSItem.Name -eq "Completed" } | Select-Object -ExpandProperty Count
+        $PctComplete = ($CompletedThreads / $TotalThreads) * 100
+        if ($PctComplete -gt 100) {$PctComplete = 100}
+        Write-Progress -Activity "AutoCoins processing symbols..." -Status "Symbols processed: $CompletedThreads/$TotalThreads ($([math]::Round($PctComplete,0))%)" -PercentComplete $PctComplete
+        Start-Sleep -Seconds $PollingInterval
+    }
+    $quarantined   = ($objects | ? { ($_.perc1hr -eq "FAIL" -or $_.perc24hr -eq "FAIL"  -or $_.perc4hr -eq "FAIL" -or $_.Ath -eq "FAIL" -or $_.Age -eq "FAIL") -and $_.Open -eq "PASS" }).symbol | sort
     $permittedCurr = ((Invoke-SqliteQuery -DataSource $dataSource -Query "SELECT * FROM Instrument")  | ? {$_.IsPermitted -eq 1 }).symbol | sort
     $permitted     = $symbols | ? {$_ -notin  $quarantined} | sort
     $unQuarantined = $permitted | ? {$_ -notin  $permittedCurr} | sort
-    $objects | select symbol,perc1hrVal,perc1hr,perc24hrVal,perc24hr,AthVal,Ath,AgeVal,Age,Open | ft -autosize | out-file -append $logfile -encoding ASCII
+    $stopWatch.Stop()
+    $executionTime = [math]::Round($stopWatch.Elapsed.TotalSeconds, 0)
+    write-host "[executionTime: $executionTime secs |  parallel threads: $MaxJobs]" -f darkgray
+    marketSwing $objects
+    $objects | select symbol,perc1hrVal,perc1hr,perc4hrVal,perc4hr,perc24hrVal,perc24hr,AthVal,Ath,AgeVal,Age,Open | ft -autosize | out-file -append $logfile -encoding ASCII
     write-log -string "Quarantined: $($quarantined -join ', ')" -color "yellow"
     $message = "**QUARANTINED**: $($quarantined -join ', ')"
     sendDiscord $settings.discord $message
@@ -185,6 +243,102 @@ function getInfo () {
     return $permitted
 }
 
+function marketSwing () {
+    param ($objects)
+    $poscoincount1 = ($objects | % {$_.perc1hrVal[0]} | ? { $_ -ge 0 }).count
+    $poscoinaverage1 = ($objects | % {$_.perc1hrVal[0]} | ? { $_ -ge 0 } | measure -Average).Average
+    $negcoincount1 = ($objects | % {$_.perc1hrVal[0]} | ? { $_ -lt 0 }).count
+    $negcoinaverage1 = ($objects | % {$_.perc1hrVal[0]} | ? { $_ -lt 0 } | measure -Average).Average
+    $posmax1 = ($objects | % {$_.perc1hrVal[0]} | ? { $_ -ge 0 } | measure -Maximum).Maximum
+    $posmaxcoin1 =  ($objects | ? {$_.perc1hrVal[0] -eq $posmax1}).symbol
+    $negmax1 = ($objects | % {$_.perc1hrVal[0]} | ? { $_ -lt 0 } | measure -Minimum).Minimum
+    $negmaxcoin1 = ($objects | ? {$_.perc1hrVal[0] -eq $negmax1}).symbol
+    $counttotal1 = $poscoincount1 + $negcoincount1
+    $pospercent1 = ($poscoincount1 / $counttotal1) * 100
+    $pospercent1 = [math]::Round($pospercent1, 0)
+    $negpercent1 = 100 - $pospercent1
+    $posave1 = [math]::Round($poscoinaverage1, 2)
+    $negave1 = [math]::Round($negcoinaverage1, 2)
+    $posmax1 = [math]::Round($posmax1, 2)
+    $negmax1 = [math]::Round($negmax1, 2)
+
+    $poscoincount4 = ($objects | % {$_.perc4hrVal[0]} | ? { $_ -ge 0 }).count
+    $poscoinaverage4 = ($objects | % {$_.perc4hrVal[0]} | ? { $_ -ge 0 } | measure -Average).Average
+    $negcoincount4 = ($objects | % {$_.perc4hrVal[0]} | ? { $_ -lt 0 }).count
+    $negcoinaverage4 = ($objects | % {$_.perc4hrVal[0]} | ? { $_ -lt 0 } | measure -Average).Average
+    $posmax4 = ($objects | % {$_.perc4hrVal[0]} | ? { $_ -ge 0 } | measure -Maximum).Maximum
+    $posmaxcoin4 =  ($objects | ? {$_.perc4hrVal[0] -eq $posmax4}).symbol
+    $negmax4 = ($objects | % {$_.perc4hrVal[0]} | ? { $_ -lt 0 } | measure -Minimum).Minimum
+    $negmaxcoin4 = ($objects | ? {$_.perc4hrVal[0] -eq $negmax4}).symbol
+    $counttotal4 = $poscoincount4 + $negcoincount4
+    $pospercent4 = ($poscoincount4 / $counttotal4) * 100
+    $pospercent4 = [math]::Round($pospercent4, 0)
+    $negpercent4 = 100 - $pospercent4
+    $posave4 = [math]::Round($poscoinaverage4, 2)
+    $negave4 = [math]::Round($negcoinaverage4, 2)
+    $posmax4 = [math]::Round($posmax4, 2)
+    $negmax4 = [math]::Round($negmax4, 2)
+
+    $poscoincount24 = ($objects.perc24hrVal | ? { $_ -ge 0 }).count
+    $poscoinaverage24 = ($objects.perc24hrVal | ? { $_ -ge 0 } | measure -Average).Average
+    $negcoincount24 = ($objects.perc24hrVal | ? { $_ -lt 0 }).count
+    $poscoinaverage24 = ($objects.perc24hrVal | ? { $_ -lt 0 } | measure -Average).Average
+    $posmax24 = ($objects.perc24hrVal | ? { $_ -ge 0 } | measure -Maximum).Maximum
+    $posmaxcoin24 =  ($objects | ? {$_.perc24hrVal -eq $posmax24}).symbol
+    $negmax24 = ($objects.perc24hrVal | ? { $_ -lt 0 } | measure -Minimum).Minimum
+    $negmaxcoin24 = ($objects | ? {$_.perc24hrVal -eq $negmax24}).symbol
+    $counttotal24 = $poscoincount24 + $negcoincount24
+    $pospercent24 = ($poscoincount24 / $counttotal24) * 100
+    $pospercent24 = [math]::Round($pospercent24, 0)
+    $negpercent24 = 100 - $pospercent24
+    $posave24 = [math]::Round($poscoinaverage24, 2)
+    $negave24 = [math]::Round($negcoinaverage24, 2)
+    $posmax24 = [math]::Round($posmax24, 2)
+    $negmax24 = [math]::Round($negmax24, 2)
+    $swing1 = $pospercent1 - $negpercent1
+    if ($swing1 -lt 0) {
+        $swing1 = [math]::Abs($swing1)
+        $swingmood1 = "$swing1% Bearish"
+    } else { $swingmood1 = "$swing1% Bullish" }
+    $swing4 = $pospercent4 - $negpercent4
+    if ($swing4 -lt 0) {
+        $swing4 = [math]::Abs($swing4)
+        $swingmood4 = "$swing4% Bearish"
+    } else { $swingmood4 = "$swing4% Bullish" }
+    $swing24 = $pospercent24 - $negpercent24
+    if ($swing24 -lt 0) {
+        $swing24 = [math]::Abs($swing24)
+        $swingmood24 = "$swing24% Bearish"
+    } else { $swingmood24 = "$swing24% Bullish" }
+    # $longvwap24 = [math]::Round((($settings.longVwapMax - $settings.longVwapMin) * ($negpercent24 / 100)) + $settings.longVwapMin, 1)
+    # $shortvwap24 = [math]::Round((($settings.shortVwapMax - $settings.shortVwapMin) * ($pospercent24 / 100)) + $settings.shortVwapMin, 1)
+    # $longvwap1 = [math]::Round((($settings.longVwapMax - $settings.longVwapMin) * ($negpercent1 / 100)) + $settings.longVwapMin, 1)
+    # $shortvwap1 = [math]::Round((($settings.shortVwapMax - $settings.shortVwapMin) * ($pospercent1 / 100)) + $settings.shortVwapMin, 1)
+    Write-Host "`nMarketSwing 1hr - $swingmood1" -f cyan
+    # Write-Host "| Recommended lVwap: $longvwap1".PadRight(10) -f "cyan" -NoNewline
+    Write-Host "| $pospercent1% Long | $poscoincount1 Coins | Average $posave1% | Max $posmax1% $posmaxcoin1" -f "green"
+    # Write-Host "| Recommended sVwap: $shortvwap1".PadRight(10) -f "cyan" -NoNewline
+    Write-Host "| $negpercent1% Short | $negcoincount1 Coins | Average $negave1% | Max $negmax1% $negmaxcoin1" -f "magenta"
+    Write-Host "MarketSwing 4hrs - $swingmood4" -f cyan
+    # Write-Host "| vwap $longvwap4".PadRight(10) -f "cyan" -NoNewline
+    Write-Host "| $pospercent4% Long | $poscoincount4 Coins | Average $posave4% | Max $posmax4% $posmaxcoin4" -f "green"
+    # Write-Host "| vwap $shortvwap4".PadRight(10) -f "cyan" -NoNewline
+    Write-Host "| $negpercent4% Short | $negcoincount4 Coins | Average $negave4% | Max $negmax4% $negmaxcoin4" -f "magenta"
+    Write-Host "MarketSwing 24hrs - $swingmood24" -f cyan
+    # Write-Host "| vwap $longvwap24".PadRight(10) -f "cyan" -NoNewline
+    Write-Host "| $pospercent24% Long | $poscoincount24 Coins | Average $posave24% | Max $posmax24% $posmaxcoin24" -f "green"
+    # Write-Host "| vwap $shortvwap24".PadRight(10) -f "cyan" -NoNewline
+    Write-Host "| $negpercent24% Short | $negcoincount24 Coins | Average $negave24% | Max $negmax24% $negmaxcoin24`n" -f "magenta"
+    $message = "**MarketSwing** - Last 1hr - $swingmood1`n$pospercent1% Long | $poscoincount1 Coins | Ave $posave1% | Max $posmax1% $posmaxcoin1`n" + "$negpercent1% Short | $negcoincount1 Coins | Ave $negave1% | Max $negmax1% $negmaxcoin1"
+    sendDiscord $settings.discord $message
+    $message = "**MarketSwing** - Last 4hrs - $swingmood4`n$pospercent4% Long | $poscoincount4 Coins | Ave $posave4% | Max $posmax4% $posmaxcoin4`n" + "$negpercent4% Short | $negcoincount4 Coins | Ave $negave4% | Max $negmax4% $negmaxcoin4"
+    sendDiscord $settings.discord $message
+    $message = "**MarketSwing** - Last 24hrs - $swingmood24`n$pospercent24% Long | $poscoincount24 Coins | Ave $posave24% | Max $posmax24% $posmaxcoin24`n" + "$negpercent24% Short | $negcoincount24 Coins | Ave $negave24% | Max $negmax24% $negmaxcoin24"
+    sendDiscord $settings.discord $message
+}
+
+
+
 write-host "`n`n`n`n`n`n`n`n`n`n"
 checkLatest
 
@@ -192,10 +346,9 @@ while ($true) {
     $date = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
     $settings = gc "$($path)\autoCoins.json" | ConvertFrom-Json
     if ($settings.proxy -ne "http://PROXYIP:PROXYPORT" -and $settings.proxy -ne "") {
-        write-log -string "Using proxy $($settings.proxy)" -color "Cyan"
+        write-log -string "Using proxy $($settings.proxy)" -color "DarkGray"
     }
-    write-log -string "Calculating coin list ..." -color "Green"
-    $coinList = getInfo $settings.max1hrPercent $settings.max24hrPercent $settings.minAthPercent $settings.minAge
+    $coinList = getInfo
     ### get currently enabled coins
     if ($coinList) {
         # write-log -string "Backing up your current WH database..." -color "Green"
@@ -219,7 +372,7 @@ while ($true) {
     } else {
         write-log -string "Data could not be obtained. Waiting till next cycle..." -color "red"
     }
-    betterSleep ($settings.refresh * 60) "AutoCoins $($version) (path: $($path))"
+    betterSleep ($settings.refresh * 60) "AutoCoins $($version) by Daisy (path: $($path))"
 }
 
 

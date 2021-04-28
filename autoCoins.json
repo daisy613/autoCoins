@@ -1,6 +1,7 @@
 [
   {
     "max1hrPercent": 5,
+    "max4hrPercent": 5,
     "max24hrPercent": 10,
     "minAthPercent": 5,
     "minAge": 14,
