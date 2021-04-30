@@ -4,11 +4,10 @@
 ### issues:  https://github.com/daisy613/autoCoins/issues
 ### tldr:    This Powershell script dynamically controls the coin list in WickHunter bot to blacklist\un-blacklist coins based on proximity to ATH, 1hr/24hr price change and minimum coin age.
 ### Changelog:
-### * increased coin processing speed by running multiple threads.
-### * added 4hr price change (default 5%).
-### * added marketSwing stats by Miyagi (Big thanks!!!).
-### * added execution time display for coin calculations.
-### * corrected the ATH value reported in the logs.
+### * added geoIp info
+### * added a random wait (up to one sec) into each thread to confuse the API thresholds
+### * fixed log truncating
+### * fixed discord rate limiting issues
 
 $path = Split-Path $MyInvocation.MyCommand.Path
 
@@ -19,7 +18,7 @@ If (-NOT ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdenti
     Break
 }
 
-$version = "v1.2.7"
+$version = "v1.2.8"
 [Net.ServicePointManager]::SecurityProtocol = "tls12, tls11, tls"
 $host.UI.RawUI.WindowTitle = "AutoCoins $($version) - $($path)"
 
@@ -45,8 +44,8 @@ if (!("max4hrPercent" -in ($settings | gm).name)) {
 if (!($settings)) { write-log -string "Cannot find $($path)\autoCoins.json file!" -color "DarkRed"; sleep 30 ; exit }
 $dataSource = "$($path)\storage.db"
 $logfile = "$($path)\autoCoins.log"
-$maxLogSize = 10MB
-$MaxJobs = 10
+$maxLogSize = 20MB
+$MaxJobs = 20
 
 ######################################################################################################
 
@@ -81,11 +80,11 @@ function betterSleep () {
 }
 
 function archiveLog () {
-    param ($maxLogSize = 50MB)
-    $logSize = (Get-Item -Path $logFile).Length / 1MB
+    param ($maxLogSize = 20MB)
+    $logSize = (Get-Item -Path $logFile).Length
     if ($logSize -ge $maxLogSize) {
-        $logFile = Get-Item -Path $logFile
-        $archiveFileName = '{0}_{1}{2}' -f $logFile.BaseName,(Get-Date -Format 'yyyy-MM-dd'),$logFile.Extension
+        $logFileObject = Get-Item -Path $logFile | select *
+        $archiveFileName = '{0}\{1}_{2}{3}' -f $logFileObject.Directory,$logFileObject.BaseName,(Get-Date -Format 'yyyy-MM-dd'),$logFileObject.Extension
         Copy-Item -Path $logFile -Destination $archiveFileName
         # if (test-path "$($logFile).zip") { Remove-Item "$($logFile).zip" }
         # Compress-Archive -Path $archiveFileName -DestinationPath "$($logFile).zip"
@@ -105,7 +104,13 @@ function sendDiscord () {
     }
 }
 
-function Invoke-RestMethodCustom ($uri,$proxy,$proxyUser,$proxyPass) {
+function getGeo () {
+    $uri = 'https://ipapi.co/' + @(Invoke-RestMethodCustom "http://ifconfig.me/ip" $settings.proxy $settings.proxyUser $settings.proxyPass) + '/json'
+    Invoke-RestMethod $uri
+}
+
+function Invoke-RestMethodCustom () {
+    Param($uri,$proxy,$proxyUser,$proxyPass)
     if ($proxy -ne "http://PROXYIP:PROXYPORT" -and $proxy -ne "" -and $proxyUser -eq "") {
         $result = Invoke-RestMethod -Uri $uri -Proxy $proxy
     } elseif ($proxy -ne "http://PROXYIP:PROXYPORT" -and $proxy -ne "" -and $proxyUser -ne "") {
@@ -131,16 +136,20 @@ function getSymbols () {
 function getInfo () {
     # Param($max1hrPercent,$max24hrPercent,$minAthPercent,$minAge)
     $symbols = getSymbols
+    $Global:callsTotal++
     $coins = @()
     $quarantined = @()
     write-host "Calculating coin list ...  " -f "DarkGray" -NoNewline
     $uri = "https://fapi.binance.com/fapi/v1/ticker/24hr"
     $24HrPrices = (Invoke-RestMethodCustom $uri $settings.proxy $settings.proxyUser $settings.proxyPass) | select symbol,priceChangePercent
+    $Global:callsTotal++
     $openPositions = (Invoke-SqliteQuery -DataSource $DataSource -Query "SELECT symbol FROM [Order] WHERE State = 'New'").Symbol
     $symbols = $symbols | ? { $_ -notin $settings.blacklist }
+    $Global:callsTotal += $symbols.length * 3
     $objects = @()
     $scriptBlock = {
         param($symbol)
+        sleep (get-random -min 0.1 -max 1)
         function Invoke-RestMethodCustom ($uri,$proxy,$proxyUser,$proxyPass) {
             if ($proxy -ne "http://PROXYIP:PROXYPORT" -and $proxy -ne "" -and $proxyUser -eq "") {
                 $result = Invoke-RestMethod -Uri $uri -Proxy $proxy
@@ -160,6 +169,7 @@ function getInfo () {
         if ($settings.cooldownHrs -ge 4) {
             $minCandles = $settings.cooldownHrs
         } else { $minCandles = 4 }
+        $dateTime = get-date -format "yyyy-MM-dd HH:mm:ss"
         $limit = $minCandles * 60
         $uri = "https://fapi.binance.com/fapi/v1/klines?symbol=$($symbol)&interval=1m&limit=$($limit)"
         $1hrPrices = (Invoke-RestMethodCustom $uri $settings.proxy $settings.proxyUser $settings.proxyPass) | % { $_[1] }
@@ -196,6 +206,7 @@ function getInfo () {
             "Age"         = $(if ($age -gt $settings.minAge) { "PASS" } else { "FAIL" })
             "AgeVal"      = $age
             "Open"        = $(if ($symbol -notin $Using:openPositions) { "PASS" } else { "FAIL" })
+            "dateTime"    = $dateTime
         }
     }
     $stopWatch = [system.diagnostics.stopwatch]::StartNew()
@@ -221,9 +232,10 @@ function getInfo () {
     $permittedCurr = ((Invoke-SqliteQuery -DataSource $dataSource -Query "SELECT * FROM Instrument")  | ? {$_.IsPermitted -eq 1 }).symbol | sort
     $permitted     = $symbols | ? {$_ -notin  $quarantined} | sort
     $unQuarantined = $permitted | ? {$_ -notin  $permittedCurr} | sort
+    $openNotQuarantined = ($objects | ? { $_.Open -eq "FAIL" -and ($_.perc1hr -eq "FAIL" -or $_.perc24hr -eq "FAIL" -or $_.Ath -eq "FAIL" -or $_.Age -eq "FAIL") }).symbol
     $stopWatch.Stop()
     $executionTime = [math]::Round($stopWatch.Elapsed.TotalSeconds, 0)
-    write-host "[executionTime: $executionTime secs |  parallel threads: $MaxJobs]" -f darkgray
+    write-host "[ executionTime: $executionTime secs | parallel threads: $MaxJobs ]" -f darkgray
     marketSwing $objects
     $objects | select symbol,perc1hrVal,perc1hr,perc4hrVal,perc4hr,perc24hrVal,perc24hr,AthVal,Ath,AgeVal,Age,Open | ft -autosize | out-file -append $logfile -encoding ASCII
     write-log -string "Quarantined: $($quarantined -join ', ')" -color "yellow"
@@ -234,7 +246,6 @@ function getInfo () {
         $message = "**UNQUARANTINED**: $($unQuarantined -join ', ')"
         sendDiscord $settings.discord $message
     }
-    $openNotQuarantined = ($objects | ? { $_.Open -eq "FAIL" -and ($_.perc1hr -eq "FAIL" -or $_.perc24hr -eq "FAIL" -or $_.Ath -eq "FAIL" -or $_.Age -eq "FAIL") }).symbol
     if ($openNotQuarantined) {
         write-log -string "Open Positions (could not quarantine): $($openNotQuarantined -join ', ')" -color "yellow"
         $message = "**OPEN POSITIONS - NOT QUARANTINED**: $($openNotQuarantined -join ', ')"
@@ -329,24 +340,27 @@ function marketSwing () {
     Write-Host "| $pospercent24% Long | $poscoincount24 Coins | Average $posave24% | Max $posmax24% $posmaxcoin24" -f "green"
     # Write-Host "| vwap $shortvwap24".PadRight(10) -f "cyan" -NoNewline
     Write-Host "| $negpercent24% Short | $negcoincount24 Coins | Average $negave24% | Max $negmax24% $negmaxcoin24`n" -f "magenta"
-    $message = "**MarketSwing** - Last 1hr - $swingmood1`n$pospercent1% Long | $poscoincount1 Coins | Ave $posave1% | Max $posmax1% $posmaxcoin1`n" + "$negpercent1% Short | $negcoincount1 Coins | Ave $negave1% | Max $negmax1% $negmaxcoin1"
+    $message = "**MarketSwing - Last 1hr** - $swingmood1`n$pospercent1% Long | $poscoincount1 Coins | Ave $posave1% | Max $posmax1% $posmaxcoin1`n" + "$negpercent1% Short | $negcoincount1 Coins | Ave $negave1% | Max $negmax1% $negmaxcoin1 `n**MarketSwing - Last 4hrs** - $swingmood4`n$pospercent4% Long | $poscoincount4 Coins | Ave $posave4% | Max $posmax4% $posmaxcoin4`n" + "$negpercent4% Short | $negcoincount4 Coins | Ave $negave4% | Max $negmax4% $negmaxcoin4 `n**MarketSwing - Last 24hrs** - $swingmood24`n$pospercent24% Long | $poscoincount24 Coins | Ave $posave24% | Max $posmax24% $posmaxcoin24`n" + "$negpercent24% Short | $negcoincount24 Coins | Ave $negave24% | Max $negmax24% $negmaxcoin24"
     sendDiscord $settings.discord $message
-    $message = "**MarketSwing** - Last 4hrs - $swingmood4`n$pospercent4% Long | $poscoincount4 Coins | Ave $posave4% | Max $posmax4% $posmaxcoin4`n" + "$negpercent4% Short | $negcoincount4 Coins | Ave $negave4% | Max $negmax4% $negmaxcoin4"
-    sendDiscord $settings.discord $message
-    $message = "**MarketSwing** - Last 24hrs - $swingmood24`n$pospercent24% Long | $poscoincount24 Coins | Ave $posave24% | Max $posmax24% $posmaxcoin24`n" + "$negpercent24% Short | $negcoincount24 Coins | Ave $negave24% | Max $negmax24% $negmaxcoin24"
-    sendDiscord $settings.discord $message
+    # $message = "**MarketSwing - Last 4hrs** - $swingmood4`n$pospercent4% Long | $poscoincount4 Coins | Ave $posave4% | Max $posmax4% $posmaxcoin4`n" + "$negpercent4% Short | $negcoincount4 Coins | Ave $negave4% | Max $negmax4% $negmaxcoin4"
+    # sendDiscord $settings.discord $message
+    # $message = "**MarketSwing - Last 24hrs** - $swingmood24`n$pospercent24% Long | $poscoincount24 Coins | Ave $posave24% | Max $posmax24% $posmaxcoin24`n" + "$negpercent24% Short | $negcoincount24 Coins | Ave $negave24% | Max $negmax24% $negmaxcoin24"
+    # sendDiscord $settings.discord $message
 }
 
-
-
 write-host "`n`n`n`n`n`n`n`n`n`n"
-checkLatest
 
+$stopWatchMain = [system.diagnostics.stopwatch]::StartNew()
+checkLatest
+$geoInfo = getGeo
+$Global:callsTotal = $null
 while ($true) {
-    $date = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    # $date = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    archiveLog $maxLogSize
     $settings = gc "$($path)\autoCoins.json" | ConvertFrom-Json
     if ($settings.proxy -ne "http://PROXYIP:PROXYPORT" -and $settings.proxy -ne "") {
-        write-log -string "Using proxy $($settings.proxy)" -color "DarkGray"
+        $geoInfo = getGeo
+        write-log -string "Using proxy [ $($settings.proxy) | geoIp: $($geoInfo.ip)/$($geoInfo.country_name) ]" -color "DarkGray"
     }
     $coinList = getInfo
     ### get currently enabled coins
@@ -372,7 +386,8 @@ while ($true) {
     } else {
         write-log -string "Data could not be obtained. Waiting till next cycle..." -color "red"
     }
-    betterSleep ($settings.refresh * 60) "AutoCoins $($version) by Daisy (path: $($path))"
+    $executionTimeTotal = $stopWatchMain.Elapsed.TotalSeconds
+    write-log -string "Avg API Calls/min: $([math]::Round($Global:callsTotal/($executionTimeTotal/60),0)) | running time: $([math]::Round($executionTimeTotal/60,1)) mins" -color "DarkGray"
+    betterSleep ($settings.refresh * 60) "AutoCoins: $($version) - by: Daisy - path: $($path) - geoIp: $($geoinfo.ip)/$($geoinfo.country_name)"
 }
-
 
