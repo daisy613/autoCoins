@@ -4,10 +4,15 @@
 ### issues:  https://github.com/daisy613/autoCoins/issues
 ### tldr:    This Powershell script dynamically controls the coin list in WickHunter bot to blacklist\un-blacklist coins based on proximity to ATH, 1hr/24hr price change and minimum coin age.
 ### Changelog:
-### * added geoIp info
-### * added a random wait (up to one sec) into each thread to confuse the API thresholds
+### * increased coin processing speed by running multiple threads.
+### * added 4hr price change (default 5%).
+### * added marketSwing stats by **Miyagi (Big thanks!!!)**.
+### * added execution time display for coin calculations.
+### * added geoIp info.
+### * fixed the ATH value reported in the logs.
 ### * fixed log truncating
 ### * fixed discord rate limiting issues
+### * added a random wait (up to one sec) into each thread.
 
 $path = Split-Path $MyInvocation.MyCommand.Path
 
