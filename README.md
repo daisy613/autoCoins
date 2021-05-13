@@ -1,7 +1,7 @@
 # :blossom: AutoCoins
 (from [WH scripts collection](https://github.com/daisy613/wickHunter-scripts))
 
-![](https://i.imgur.com/G6slRne.png)
+![](https://i.imgur.com/irVC0PS.png)
 ![](https://i.imgur.com/4VUpzYf.png)
 
 ## What it does:
