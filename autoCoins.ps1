@@ -2,17 +2,17 @@
 ### discord: Daisy#2718
 ### site:    https://github.com/daisy613/autoCoins
 ### issues:  https://github.com/daisy613/autoCoins/issues
-### tldr:    This Powershell script dynamically controls the coin list in WickHunter bot to blacklist\un-blacklist coins based on proximity to ATH, 1hr/24hr price change and minimum coin age.
+### tldr:    This Powershell script dynamically controls the coin list in WickHunter bot to blacklist\un-blacklist coins based on proximity to ATH, 1hr/4hr/24hr price change and minimum coin age.
 ### Changelog:
-### * increased coin processing speed by running multiple threads.
-### * added 4hr price change (default 5%).
-### * added marketSwing stats by **Miyagi (Big thanks!!!)**.
-### * added execution time display for coin calculations.
-### * added geoIp info.
-### * fixed the ATH value reported in the logs.
-### * fixed log truncating
-### * fixed discord rate limiting issues
-### * added a random wait (up to one sec) into each thread.
+### * fixed: missing coins during processing
+### * fixed: positions that closed/opened during the coin processing cycle now get properly registered
+### * fixed: coins that couldn't be processed are now automatically quarantined
+### * fixed: coin table in the log output is not truncating at 80 chars anymore
+### * fixed: coin table in the log is now sorted
+### * added: Newly Quarantined coins output
+### * added: 5 min max to the coin processing loop to prevent stuck loops
+### * updated\improved: write-log function
+### * improved: logging of errors
 
 $path = Split-Path $MyInvocation.MyCommand.Path
 
@@ -23,9 +23,32 @@ If (-NOT ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdenti
     Break
 }
 
-$version = "v1.2.8"
+$version = "v1.2.9"
+$scriptName = [io.path]::GetFileNameWithoutExtension($MyInvocation.MyCommand.Name)
 [Net.ServicePointManager]::SecurityProtocol = "tls12, tls11, tls"
+#set the Title of the window
 $host.UI.RawUI.WindowTitle = "AutoCoins $($version) - $($path)"
+$ErrorActionPreference = "Continue"
+
+$settings = gc "$($path)\$($scriptName).json" | ConvertFrom-Json
+if (!($settings)) { write-log -object "Cannot find $($path)\$($scriptName).json file!" -foregroundcolor "DarkRed"; sleep 30 ; exit }
+# housekeeping
+if (!("cooldownHrs" -in ($settings | gm).name)) {
+    $settings | Add-Member -MemberType NoteProperty -Name "cooldownHrs" -Value 4
+    $settings | ConvertTo-Json | sc "$($path)\$($scriptName).json" -force
+}
+if (!("max4hrPercent" -in ($settings | gm).name)) {
+    $settings | Add-Member -MemberType NoteProperty -Name "max4hrPercent" -Value 5
+    $settings | ConvertTo-Json | sc "$($path)\$($scriptName).json" -force
+}
+$dataSource = "$($path)\storage.db"
+$logfile = "$($path)\$($scriptName).log"
+$maxLogSize = 20MB
+$MaxJobs = 20
+
+if ($settings.proxyUser -ne "") { $proxCred = new-object -typename System.Management.Automation.PSCredential -argumentlist ([pscustomobject] @{ UserName = $settings.proxyUser; Password = (ConvertTo-SecureString -AsPlainText -Force -String $settings.proxyPass)[0] }) }
+
+######################################################################################################
 
 If (!(Get-Module -Name "PSSQLite")) {
     Install-Module "PSSQLite" -Scope CurrentUser -SkipPublisherCheck -Confirm:$false -ea SilentlyContinue
@@ -36,38 +59,23 @@ If (!(Get-Module -Name "PoshRSJob")) {
     Import-Module "PoshRSJob" -DisableNameChecking -Verbose:$false | Out-Null
 }
 
-$settings = gc "$($path)\autoCoins.json" | ConvertFrom-Json
-# housekeeping
-if (!("cooldownHrs" -in ($settings | gm).name)) {
-    $settings | Add-Member -MemberType NoteProperty -Name "cooldownHrs" -Value 4
-    $settings | ConvertTo-Json | sc "$($path)\autoCoins.json" -force
-}
-if (!("max4hrPercent" -in ($settings | gm).name)) {
-    $settings | Add-Member -MemberType NoteProperty -Name "max4hrPercent" -Value 5
-    $settings | ConvertTo-Json | sc "$($path)\autoCoins.json" -force
-}
-if (!($settings)) { write-log -string "Cannot find $($path)\autoCoins.json file!" -color "DarkRed"; sleep 30 ; exit }
-$dataSource = "$($path)\storage.db"
-$logfile = "$($path)\autoCoins.log"
-$maxLogSize = 20MB
-$MaxJobs = 20
-
-######################################################################################################
-
 Function write-log {
-    Param ([string]$string,$color="Yellow")
+    Param ([string]$object,[string]$foregroundColor="Yellow",[string]$backgroundColor,[switch]$noNewLine,$log = $logfile)
+    if (!($logFile)) { $Logfile = "$path\$([io.path]::GetFileNameWithoutExtension($MyInvocation.MyCommand.Name)).log" }
     $date = Get-Date -Format "$($version) yyyy-MM-dd HH:mm:ss"
-    Write-Host "[$date] $string" -ForegroundColor $color
-    Add-Content $Logfile -Value "[$date] $string"
+    $command = "Write-Host -Object " + "`"[" + $date + "] " + $object + "`"" + " -ForegroundColor $foregroundColor" + $(if ($backgroundColor) { " -BackgroundColor $backgroundColor"}) + $(if ($noNewLine) { " -NoNewLine" })
+    $scriptBlock = [scriptblock]::create($command)
+    Invoke-Command -command $scriptBlock
+    Add-Content $Logfile -Value "[$date] $object"
 }
 
 function checkLatest () {
-    $repo = "daisy613/autoCoins"
+    $repo = "daisy613/$scriptName"
     $releases = "https://api.github.com/repos/$repo/releases"
     $latestTag = [array](Invoke-WebRequest $releases -UseBasicParsing | ConvertFrom-Json)[0].tag_name
     $youngerVer = ($version, $latestTag | Sort-Object)[-1]
     if ($latestTag -and $version -ne $youngerVer) {
-        write-log -string "Your version of $($repo) [$($version)] is outdated. Newer version [$($latestTag)] is available: https://github.com/$($repo)/releases/tag/$($latestTag)" -color "Red"
+        write-log -object "Your version of $($repo) [$($version)] is outdated. Newer version [$($latestTag)] is available: https://github.com/$($repo)/releases/tag/$($latestTag)" -foregroundcolor "Red"
     }
 }
 
@@ -86,14 +94,16 @@ function betterSleep () {
 
 function archiveLog () {
     param ($maxLogSize = 20MB)
-    $logSize = (Get-Item -Path $logFile).Length
-    if ($logSize -ge $maxLogSize) {
-        $logFileObject = Get-Item -Path $logFile | select *
-        $archiveFileName = '{0}\{1}_{2}{3}' -f $logFileObject.Directory,$logFileObject.BaseName,(Get-Date -Format 'yyyy-MM-dd'),$logFileObject.Extension
-        Copy-Item -Path $logFile -Destination $archiveFileName
-        # if (test-path "$($logFile).zip") { Remove-Item "$($logFile).zip" }
-        # Compress-Archive -Path $archiveFileName -DestinationPath "$($logFile).zip"
-        Remove-Item -Path $logFile
+    if (test-path $logfile) {
+        $logSize = (Get-Item -Path $logFile).Length
+        if ($logSize -ge $maxLogSize) {
+            $logFileObject = Get-Item -Path $logFile | select *
+            $archiveFileName = '{0}\{1}_{2}{3}' -f $logFileObject.Directory,$logFileObject.BaseName,(Get-Date -Format 'yyyy-MM-dd'),$logFileObject.Extension
+            Copy-Item -Path $logFile -Destination $archiveFileName
+            # if (test-path "$($logFile).zip") { Remove-Item "$($logFile).zip" }
+            # Compress-Archive -Path $archiveFileName -DestinationPath "$($logFile).zip"
+            Remove-Item -Path $logFile
+        }
     }
 }
 
@@ -110,65 +120,84 @@ function sendDiscord () {
 }
 
 function getGeo () {
-    $uri = 'https://ipapi.co/' + @(Invoke-RestMethodCustom "http://ifconfig.me/ip" $settings.proxy $settings.proxyUser $settings.proxyPass) + '/json'
+    $ip =  $(Invoke-Command ([scriptblock]::create('Invoke-RestMethod -Method Get -Uri "http://ifconfig.me/ip"' + $(if ($settings.proxy -ne "http://PROXYIP:PROXYPORT" -and $settings.proxy -ne "") { ' -Proxy "' + $settings.proxy + '"' }) + $(if ($settings.proxyUser -ne "") { ' -ProxyCredential "' + $proxCred + '"' }) ) ) )
+    $uri = 'https://ipapi.co/' + $ip + '/json'
     Invoke-RestMethod $uri
 }
 
-function Invoke-RestMethodCustom () {
-    Param($uri,$proxy,$proxyUser,$proxyPass)
-    if ($proxy -ne "http://PROXYIP:PROXYPORT" -and $proxy -ne "" -and $proxyUser -eq "") {
-        $result = Invoke-RestMethod -Uri $uri -Proxy $proxy
-    } elseif ($proxy -ne "http://PROXYIP:PROXYPORT" -and $proxy -ne "" -and $proxyUser -ne "") {
-        $proxCred = new-object -typename System.Management.Automation.PSCredential -argumentlist ([pscustomobject] @{
-            UserName = $proxyUser;
-            Password = (ConvertTo-SecureString -AsPlainText -Force -String $proxyPass)[0]
-          })
-        $result = Invoke-RestMethod -Uri $uri -Proxy $proxy -ProxyCredential $proxCred
-    } else {
-        $result = Invoke-RestMethod -Uri $uri
-    }
-    return $result
-}
+# function Invoke-RestMethodCustom () {
+#     Param($uri,$proxy,$proxyUser,$proxyPass)
+#     if ($proxy -ne "http://PROXYIP:PROXYPORT" -and $proxy -ne "" -and $proxyUser -eq "") {
+#         $result = Invoke-RestMethod -Uri $uri -Proxy $proxy
+#     } elseif ($proxy -ne "http://PROXYIP:PROXYPORT" -and $proxy -ne "" -and $proxyUser -ne "") {
+#         $proxCred = new-object -typename System.Management.Automation.PSCredential -argumentlist ([pscustomobject] @{
+#             UserName = $proxyUser;
+#             Password = (ConvertTo-SecureString -AsPlainText -Force -String $proxyPass)[0]
+#           })
+#         $result = Invoke-RestMethod -Uri $uri -Proxy $proxy -ProxyCredential $proxCred
+#     } else {
+#         $result = Invoke-RestMethod -Uri $uri
+#     }
+#     return $result
+# }
+
+# this is a retry function with exponential backoff delay, to mitigate "too many requests" errors
+function retry () {
+    param(
+        [Parameter(Mandatory=$true)][scriptblock]$action,
+        [Parameter(Mandatory=$false)][int]$maxAttempts = 3
+    )
+    $attempts=1
+    $ErrorActionPreferenceToRestore = $ErrorActionPreference
+    $ErrorActionPreference = "Stop"
+    do {
+        try {
+            $action.Invoke()
+            break
+        } catch [Exception] {
+          $errorContent = $_.Exception
+          # Write-Host "[ERROR]" $errorContent.ErrorRecord -f "Red"
+          Write-log -object "[ERROR] $($errorContent.ErrorRecord)" -f "Red"
+        }
+        # exponential backoff delay
+        $attempts++
+        if ($attempts -le $maxAttempts) {
+            $retryDelaySeconds = [math]::Pow(2, $attempts)
+            $retryDelaySeconds = $retryDelaySeconds - 1  # Exponential Backoff Max == (2^n)-1
+            Write-Log("[RETRYING] Action failed. Waiting " + $retryDelaySeconds + " seconds before attempt " + $attempts + " of " + $maxAttempts + "...") -f darkred
+            Start-Sleep $retryDelaySeconds
+        } else {
+            $ErrorActionPreference = $ErrorActionPreferenceToRestore
+            Write-Log("[ERROR] Maximum re-attempts of " + $maxAttempts + " times reached. Error: " + $errorContent.ErrorRecord) -f darkred
+            Write-Error $errorContent.ErrorRecord
+        }
+    } while ($attempts -le $maxAttempts)
+    $ErrorActionPreference = $ErrorActionPreferenceToRestore
+  }
 
 function getSymbols () {
     $uri = "https://fapi.binance.com/fapi/v1/exchangeInfo"
-    $symbols = ((Invoke-RestMethodCustom $uri $settings.proxy $settings.proxyUser $settings.proxyPass).symbols).symbol | Sort-Object
+    $data = Invoke-Command ([scriptblock]::create('Invoke-RestMethod -Method Get -Uri "' + $uri + '"' + $(if ($settings.proxy -ne "http://PROXYIP:PROXYPORT" -and $settings.proxy -ne "") { ' -Proxy "' + $settings.proxy + '"' }) + $(if ($settings.proxyUser -ne "") { ' -ProxyCredential "' + $proxCred + '"' }) ) )
+    $symbols = ($data.symbols).symbol | Sort-Object
     return $symbols
 }
 
 # https://binance-docs.github.io/apidocs/futures/en/#kline-candlestick-data
 # https://binance-docs.github.io/apidocs/futures/en/#24hr-ticker-price-change-statistics
 function getInfo () {
-    # Param($max1hrPercent,$max24hrPercent,$minAthPercent,$minAge)
     $symbols = getSymbols
     $Global:callsTotal++
     $coins = @()
-    $quarantined = @()
-    write-host "Calculating coin list ...  " -f "DarkGray" -NoNewline
+    write-log -object "Calculating coin list ...  " -f "DarkGray" -NoNewline
     $uri = "https://fapi.binance.com/fapi/v1/ticker/24hr"
-    $24HrPrices = (Invoke-RestMethodCustom $uri $settings.proxy $settings.proxyUser $settings.proxyPass) | select symbol,priceChangePercent
+    $data = Invoke-Command ([scriptblock]::create('Invoke-RestMethod -Method Get -Uri "' + $uri + '"' + $(if ($settings.proxy -ne "http://PROXYIP:PROXYPORT" -and $settings.proxy -ne "") { ' -Proxy "' + $settings.proxy + '"' }) + $(if ($settings.proxyUser -ne "") { ' -ProxyCredential "' + $proxCred + '"' }) ) )
+    $24HrPrices = $data | select symbol,priceChangePercent
     $Global:callsTotal++
-    $openPositions = (Invoke-SqliteQuery -DataSource $DataSource -Query "SELECT symbol FROM [Order] WHERE State = 'New'").Symbol
     $symbols = $symbols | ? { $_ -notin $settings.blacklist }
     $Global:callsTotal += $symbols.length * 3
-    $objects = @()
     $scriptBlock = {
         param($symbol)
-        sleep (get-random -min 0.1 -max 1)
-        function Invoke-RestMethodCustom ($uri,$proxy,$proxyUser,$proxyPass) {
-            if ($proxy -ne "http://PROXYIP:PROXYPORT" -and $proxy -ne "" -and $proxyUser -eq "") {
-                $result = Invoke-RestMethod -Uri $uri -Proxy $proxy
-            } elseif ($proxy -ne "http://PROXYIP:PROXYPORT" -and $proxy -ne "" -and $proxyUser -ne "") {
-                $proxCred = new-object -typename System.Management.Automation.PSCredential -argumentlist ([pscustomobject] @{
-                    UserName = $proxyUser;
-                    Password = (ConvertTo-SecureString -AsPlainText -Force -String $proxyPass)[0]
-                  })
-                $result = Invoke-RestMethod -Uri $uri -Proxy $proxy -ProxyCredential $proxCred
-            } else {
-                $result = Invoke-RestMethod -Uri $uri
-            }
-            return $result
-        }
+        sleep (get-random -min 0.1 -max 3)
         $settings = $Using:settings
         # calculate the 1hr price change
         if ($settings.cooldownHrs -ge 4) {
@@ -177,7 +206,15 @@ function getInfo () {
         $dateTime = get-date -format "yyyy-MM-dd HH:mm:ss"
         $limit = $minCandles * 60
         $uri = "https://fapi.binance.com/fapi/v1/klines?symbol=$($symbol)&interval=1m&limit=$($limit)"
-        $1hrPrices = (Invoke-RestMethodCustom $uri $settings.proxy $settings.proxyUser $settings.proxyPass) | % { $_[1] }
+        # try {
+        $data = Invoke-Command ([scriptblock]::create('Invoke-RestMethod -Method Get -Uri "' + $uri + '"' + $(if ($settings.proxy -ne "http://PROXYIP:PROXYPORT" -and $settings.proxy -ne "") { ' -Proxy "' + $settings.proxy + '"' }) + $(if ($settings.proxyUser -ne "") { ' -ProxyCredential "' + $proxCred + '"' }) ) )
+        # } catch {
+        #     $ErrorMessage = $_.Exception.Message
+        #     $FailedItem = $_.Exception.ItemName
+        #     ac -Path $path\$symbol.log -value $ErrorMessage
+        # }
+        # if ($data -like "*Exception*") {write-host "Warning, Will Robinson!"; break}
+        $1hrPrices = $data | % { $_[1] }
         $1hrPercent = @()
         $i = 0
         do {
@@ -190,12 +227,16 @@ function getInfo () {
         $24hrPercentCurr = ($Using:24HrPrices | ? { $_.symbol -eq $symbol}).priceChangePercent
         # calculate age
         $uri = "https://fapi.binance.com/fapi/v1/klines?symbol=$($symbol)&interval=1d&limit=1500"
-        $age = (Invoke-RestMethodCustom $uri $settings.proxy $settings.proxyUser $settings.proxyPass).length
+        $data = Invoke-Command ([scriptblock]::create('Invoke-RestMethod -Method Get -Uri "' + $uri + '"' + $(if ($settings.proxy -ne "http://PROXYIP:PROXYPORT" -and $settings.proxy -ne "") { ' -Proxy "' + $settings.proxy + '"' }) + $(if ($settings.proxyUser -ne "") { ' -ProxyCredential "' + $proxCred + '"' }) ) )
+        # if ($data -like "*Exception*") {write-host "Warning, Will Robinson!"; break}
+        $age = $data.length
         # calculate ATH percentage
         # NOTE: the ATH calculation only shows the past 20 months due to Binance restrictions, so it's not a true ATH.
         $limit = [math]::Round((($age / 30) + 1), 0)
         $uri = "https://fapi.binance.com/fapi/v1/klines?symbol=$($symbol)&interval=1M&limit=$($limit)"
-        $ath = [decimal] ((Invoke-RestMethodCustom $uri $settings.proxy $settings.proxyUser $settings.proxyPass) | % { $_[2] } | measure -Maximum).Maximum
+        $data = Invoke-Command ([scriptblock]::create('Invoke-RestMethod -Method Get -Uri "' + $uri + '"' + $(if ($settings.proxy -ne "http://PROXYIP:PROXYPORT" -and $settings.proxy -ne "") { ' -Proxy "' + $settings.proxy + '"' }) + $(if ($settings.proxyUser -ne "") { ' -ProxyCredential "' + $proxCred + '"' }) ) )
+        # if ($data -like "*Exception*") {break}
+        $ath = [decimal] ($data | % { $_[2] } | measure -Maximum).Maximum
         $athPercentCurr = (($ath - $1hrPrices[-1]) * 100 / $ath)
         $x = $settings.cooldownHrs - 1
         [PSCustomObject][object]@{
@@ -210,57 +251,78 @@ function getInfo () {
             "AthVal"      = [math]::Round($athPercentCurr,2)
             "Age"         = $(if ($age -gt $settings.minAge) { "PASS" } else { "FAIL" })
             "AgeVal"      = $age
-            "Open"        = $(if ($symbol -notin $Using:openPositions) { "PASS" } else { "FAIL" })
+            "Open"        = ""
             "dateTime"    = $dateTime
         }
     }
     $stopWatch = [system.diagnostics.stopwatch]::StartNew()
-    $symbols | Start-RSJob -ArgumentList $_ -Throttle $MaxJobs -ScriptBlock $scriptBlock | out-null
+    $symbols | Start-RSJob -Name {"$($_)"} -FunctionsToLoad Write-Log -ArgumentList $_ -Throttle $MaxJobs -ScriptBlock $scriptBlock | out-null
+    $objects = @()
     $PollingInterval = 1
     $CompletedThreads = 0
     $PctComplete = 0
     $CurrentJobs = @()
     $Status = Get-RSJob | Group-Object -Property State
     $TotalThreads = ($Status | Select-Object -ExpandProperty Count | Measure-Object -Sum).Sum
+    $i = $null
     while ($CompletedThreads -lt $TotalThreads) {
+        $i++
         $CurrentJobs = Get-RSJob
-        $objects += $CurrentJobs.Where( { $PSItem.State -eq "Completed" }) | Receive-RSJob
-        $CurrentJobs.Where( { $PSItem.State -eq "Completed" }) | Remove-RSJob #| Out-Null
+        $CurrentJobs | % { if ($_.HasErrors) { $_ | select -ExpandProperty Error | % { throw $_ ; write-log "[ERROR] $($_)" -f "red"} } }
+        # $objects += $CurrentJobs.Where( { $PSItem.State -eq "Completed" }) | Receive-RSJob # -passthru
+        # $CurrentJobs.Where( { $PSItem.State -eq "Completed" }) | Remove-RSJob #| Out-Null
         $Status = $CurrentJobs | Group-Object -Property State
-        $CompletedThreads += $Status | Where-Object { $PSItem.Name -eq "Completed" } | Select-Object -ExpandProperty Count
+        # $CompletedThreads += $Status | Where-Object { $PSItem.Name -eq "Completed" } | Select-Object -ExpandProperty Count
+        $CompletedThreads = $Status | Where-Object { $PSItem.Name -eq "Completed" } | Select-Object -ExpandProperty Count
         $PctComplete = ($CompletedThreads / $TotalThreads) * 100
         if ($PctComplete -gt 100) {$PctComplete = 100}
         Write-Progress -Activity "AutoCoins processing symbols..." -Status "Symbols processed: $CompletedThreads/$TotalThreads ($([math]::Round($PctComplete,0))%)" -PercentComplete $PctComplete
         Start-Sleep -Seconds $PollingInterval
+        # if it's taking over 5 mins to finish, then some jobs are stuck, exit the loop
+        if ($i -eq 300) {break}
     }
-    $quarantined   = ($objects | ? { ($_.perc1hr -eq "FAIL" -or $_.perc24hr -eq "FAIL"  -or $_.perc4hr -eq "FAIL" -or $_.Ath -eq "FAIL" -or $_.Age -eq "FAIL") -and $_.Open -eq "PASS" }).symbol | sort
-    $permittedCurr = ((Invoke-SqliteQuery -DataSource $dataSource -Query "SELECT * FROM Instrument")  | ? {$_.IsPermitted -eq 1 }).symbol | sort
-    $permitted     = $symbols | ? {$_ -notin  $quarantined} | sort
-    $unQuarantined = $permitted | ? {$_ -notin  $permittedCurr} | sort
-    $openNotQuarantined = ($objects | ? { $_.Open -eq "FAIL" -and ($_.perc1hr -eq "FAIL" -or $_.perc24hr -eq "FAIL" -or $_.Ath -eq "FAIL" -or $_.Age -eq "FAIL") }).symbol
+    $objects = $CurrentJobs.Where( { $PSItem.State -eq "Completed" }) | Receive-RSJob
+    $CurrentJobs.Where( { $PSItem.State -eq "Completed" }) | Remove-RSJob
+    $openPositions = (Invoke-SqliteQuery -DataSource $DataSource -Query "SELECT symbol FROM [Order] WHERE State = 'New'").Symbol
+    $objects | % { if ($_.symbol -in $openPositions) {$_.Open = "FAIL"} else {$_.Open = "PASS"} }
+    $quarantined = @()
+    $quarantined        = ($objects | ? { ($_.perc1hr -eq "FAIL" -or $_.perc24hr -eq "FAIL" -or $_.perc4hr -eq "FAIL" -or $_.Ath -eq "FAIL" -or $_.Age -eq "FAIL") -and $_.Open -eq "PASS" }).symbol
+    $missing            = $symbols | ? { $_ -notin $objects.symbol }
+    $quarantined        = $quarantined + $missing | sort
+    $permittedCurr      = ((Invoke-SqliteQuery -DataSource $dataSource -Query "SELECT * FROM Instrument")  | ? {$_.IsPermitted -eq 1 }).symbol | sort
+    $permitted          = $symbols | ? {$_ -notin  $quarantined} | sort
+    $quarantinedCurr    = $symbols | ? { $_ -notin $permittedCurr}
+    $newQuarantined     = $quarantined | ? { $_ -notin $quarantinedCurr} | sort
+    $unQuarantined      = $permitted | ? { $_ -notin $permittedCurr} | sort
+    $openNotQuarantined = ($objects | ? { $_.Open -eq "FAIL" -and ($_.perc1hr -eq "FAIL" -or $_.perc24hr -eq "FAIL" -or $_.Ath -eq "FAIL" -or $_.Age -eq "FAIL") }).symbol | sort
     $stopWatch.Stop()
     $executionTime = [math]::Round($stopWatch.Elapsed.TotalSeconds, 0)
-    write-host "[ executionTime: $executionTime secs | parallel threads: $MaxJobs ]" -f darkgray
+    write-log -object "[ executionTime: $executionTime secs | parallel threads: $MaxJobs ]" -f darkgray
     marketSwing $objects
-    $objects | select symbol,perc1hrVal,perc1hr,perc4hrVal,perc4hr,perc24hrVal,perc24hr,AthVal,Ath,AgeVal,Age,Open | ft -autosize | out-file -append $logfile -encoding ASCII
-    write-log -string "Quarantined: $($quarantined -join ', ')" -color "yellow"
-    $message = "**QUARANTINED**: $($quarantined -join ', ')"
-    sendDiscord $settings.discord $message
+    $objects | select symbol,perc1hrVal,perc1hr,perc4hrVal,perc4hr,perc24hrVal,perc24hr,AthVal,Ath,AgeVal,Age,Open | sort symbol | ft -autosize | out-file -append $logfile -encoding ASCII -Width 180
+    $message = @()
+    write-log -object "** New Quarantined: $($newQuarantined -join ', ')" -foregroundcolor "yellow"
+    $message += "**NEW QUARANTINED**: $($newQuarantined -join ', ')"
+    write-log -object "** Quarantined: $($quarantined -join ', ')" -foregroundcolor "yellow"
+    $message += "**QUARANTINED**: $($quarantined -join ', ')"
     if ($unQuarantined) {
-        write-log -string "Un-Quarantined: $($unQuarantined -join ', ')" -color "yellow"
-        $message = "**UNQUARANTINED**: $($unQuarantined -join ', ')"
-        sendDiscord $settings.discord $message
+        write-log -object "** Un-Quarantined: $($unQuarantined -join ', ')" -foregroundcolor "yellow"
+        $message += "**UNQUARANTINED**: $($unQuarantined -join ', ')"
     }
     if ($openNotQuarantined) {
-        write-log -string "Open Positions (could not quarantine): $($openNotQuarantined -join ', ')" -color "yellow"
-        $message = "**OPEN POSITIONS - NOT QUARANTINED**: $($openNotQuarantined -join ', ')"
-        sendDiscord $settings.discord $message
+        write-log -object "** Open Positions (could not quarantine): $($openNotQuarantined -join ', ')" -foregroundcolor "yellow"
+        $message += "**OPEN POSITIONS - NOT QUARANTINED**: $($openNotQuarantined -join ', ')"
     }
+    if ($missing) {
+        write-log "** Quarantined, Could Not Be Analyzed (see logs): $($missing -join ', ')" -foregroundcolor "darkRed"
+    }
+    sendDiscord $settings.discord ($message -join "`n")
     return $permitted
 }
 
 function marketSwing () {
     param ($objects)
+    if (!($objects)) {break}
     $poscoincount1 = ($objects | % {$_.perc1hrVal[0]} | ? { $_ -ge 0 }).count
     $poscoinaverage1 = ($objects | % {$_.perc1hrVal[0]} | ? { $_ -ge 0 } | measure -Average).Average
     $negcoincount1 = ($objects | % {$_.perc1hrVal[0]} | ? { $_ -lt 0 }).count
@@ -362,15 +424,15 @@ $Global:callsTotal = $null
 while ($true) {
     # $date = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
     archiveLog $maxLogSize
-    $settings = gc "$($path)\autoCoins.json" | ConvertFrom-Json
+    $settings = gc "$($path)\$scriptName.json" | ConvertFrom-Json
     if ($settings.proxy -ne "http://PROXYIP:PROXYPORT" -and $settings.proxy -ne "") {
         $geoInfo = getGeo
-        write-log -string "Using proxy [ $($settings.proxy) | geoIp: $($geoInfo.ip)/$($geoInfo.country_name) ]" -color "DarkGray"
+        write-log -object "Using proxy [ $($settings.proxy) | geoIp: $($geoInfo.ip)/$($geoInfo.country_name) ]" -foregroundcolor "DarkGray"
     }
     $coinList = getInfo
     ### get currently enabled coins
     if ($coinList) {
-        # write-log -string "Backing up your current WH database..." -color "Green"
+        # write-log -object "Backing up your current WH database..." -foregroundcolor "Green"
         cp $dataSource "$($dataSource).bak" -force
         ### update the coins in the database
         $coins = @()
@@ -384,15 +446,14 @@ while ($true) {
             $coins += $coin
         }
         $query = 'DROP TABLE IF EXISTS "Instrument"; CREATE TABLE IF NOT EXISTS "Instrument" ( "Symbol" TEXT NOT NULL, "IsPermitted" INTEGER NOT NULL, "IsNonDeaultSettigs" INTEGER NOT NULL);'
-        if ($coins) { Invoke-SqliteQuery -DataSource $dataSource -Query $query } else {write-log -string "Found no coins data to import! Try again please." -color "Red" ; sleep 3 ; exit}
+        if ($coins) { Invoke-SqliteQuery -DataSource $dataSource -Query $query } else {write-log -object "Found no coins data to import! Try again please." -foregroundcolor "Red" ; sleep 3 ; exit}
         Invoke-SQLiteBulkCopy -DataTable ($coins | Out-DataTable) -DataSource $dataSource -Table "Instrument" -NotifyAfter 1000 -Confirm:$false
-        # write-log -string "Coin settings imported to $($dataSource)" -color "Green"
+        # write-log -object "Coin settings imported to $($dataSource)" -foregroundcolor "Green"
         write-host ""
     } else {
-        write-log -string "Data could not be obtained. Waiting till next cycle..." -color "red"
+        write-log -object "Data could not be obtained. Waiting till next cycle..." -foregroundcolor "red"
     }
     $executionTimeTotal = $stopWatchMain.Elapsed.TotalSeconds
-    write-log -string "Avg API Calls/min: $([math]::Round($Global:callsTotal/($executionTimeTotal/60),0)) | running time: $([math]::Round($executionTimeTotal/60,1)) mins" -color "DarkGray"
+    write-log -object "Avg API Calls/min: $([math]::Round($Global:callsTotal/($executionTimeTotal/60),0)) | running time: $([math]::Round($executionTimeTotal/60,1)) mins" -foregroundcolor "DarkGray"
     betterSleep ($settings.refresh * 60) "AutoCoins: $($version) - by: Daisy - path: $($path) - geoIp: $($geoinfo.ip)/$($geoinfo.country_name)"
 }
-
