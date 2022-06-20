@@ -37,8 +37,6 @@
   - Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 - If you are not sure why a certain coin was quarantined or not, please check the autoCoins.log file for the detailed reasons for each coin.
 
-## Tips/Donations:
-![](https://i.imgur.com/M46tl6t.png)
-- USDT (TRC20): TNuwZebdZmoDxrJRxUbyqzG48H4KRDR7wB
-- BTC: 1PV97ppRdWeXw4TBXddAMNmwnknU1m37t5
-- USDT/ETH (ERC20): 0x56b2239c6bde5dc1d155b98867e839ac502f01ad
+## Donations/Tips:
+- USDT (TRC20): TWhjv6ita4Y1i2xevTjxgB6g92yZLpkTwv
+- BTC: 13nsGbe7A7K1SR2KpJHRPH9eArKf823T9o
