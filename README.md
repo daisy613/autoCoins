@@ -38,5 +38,5 @@
 - If you are not sure why a certain coin was quarantined or not, please check the autoCoins.log file for the detailed reasons for each coin.
 
 ## Donations/Tips:
-- USDT (TRC20): TWhjv6ita4Y1i2xevTjxgB6g92yZLpkTwv
-- BTC: 13nsGbe7A7K1SR2KpJHRPH9eArKf823T9o
+- USDT (TRC20): `TWhjv6ita4Y1i2xevTjxgB6g92yZLpkTwv`
+- BTC: `13nsGbe7A7K1SR2KpJHRPH9eArKf823T9o`
